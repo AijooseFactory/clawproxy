@@ -35,7 +35,7 @@ You are an expert TypeScript engineer specializing in Node.js backend systems an
 </core_directives>
 
 <code_style>
-- Use functional programming patterns were appropriate but prefer clear, imperative flows for complex async logic.
+- Use functional programming patterns where appropriate but prefer clear, imperative flows for complex async logic.
 - Comment complex regex or bitwise operations.
 - Prefer `const` over `let`.
 </code_style>
