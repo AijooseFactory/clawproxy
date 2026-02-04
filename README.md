@@ -58,6 +58,25 @@ docker run -p 8080:8080 -e CLAWPROXY_GATEWAY_TOKEN="your-token" clawproxy
 # - It includes a built-in healthcheck.
 ```
 
+### Method 4: Docker Compose
+Create a `docker-compose.yml` file:
+
+```yaml
+version: '3.8'
+services:
+  clawproxy:
+    image: clawproxy:latest # Or build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - CLAWPROXY_GATEWAY_TOKEN=your-token-here
+      - CLAWPROXY_API_KEY=optional-secret
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+```
+
+> **Cloud Deployment**: For platforms like Railway, Fly.io, or Render, simply deploy this repository or push the Docker image to a registry. Set the `CLAWPROXY_GATEWAY_TOKEN` environment variable in your cloud provider's dashboard.
+
 ## Configuration
 
 ClawProxy prioritizes configuration in this order:
