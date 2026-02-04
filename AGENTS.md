@@ -20,6 +20,11 @@ This document serves as a "context beacon" for AI agents (specifically Claude an
     - **Modularity**: Separate concerns (Gateway Logic vs. HTTP Layer).
     - **Security**: Localhost by default; API Key optional.
 
+### 2.1 Critical Architectural Invariants (DO NOT BREAK)
+* **Smart Session Protocol:** The proxy MUST support both `stateful` (strip context, send last msg + sessionID) and `passthrough` modes. Never revert to simple stateless forwarding without checking config.
+* **Confirmation Loop:** Security confirmations (`requires_confirmation`) MUST pause the stream and inject a System Notice. Never auto-approve sensitive actions.
+* **Race Condition Locking:** Event handlers MUST capture `runId` immediately to prevent race conditions. Do not rely solely on late-arriving metadata.
+
 ---
 
 ## 3. Instructions for Claude
@@ -32,6 +37,9 @@ You are an expert TypeScript engineer specializing in Node.js backend systems an
 2. **Chain of Thought**: Before writing code, analyze the request inside <analysis> tags. Break down the problem, identify potential edge cases (especially with Streaming/SSE), and propose a solution.
 3. **Zod First**: Define Zod schemas *before* usage. Runtime validation is critical.
 4. **Event-Driven**: diverse concurrent operations should communicate via Typed `EventEmitter` interfaces.
+<negative_constraint>
+NO_HALLUCINATED_IMPORTS: Do not import 'openclaw-sdk' or other non-existent libraries. Use the local src/client.ts implementation.
+</negative_constraint>
 </core_directives>
 
 <code_style>
@@ -62,6 +70,7 @@ When asked to implement a feature:
     *   Start every response with a `**Logic Check**` section.
     *   Detail what the user wants vs. what exists.
     *   Identify dependencies (e.g., does this change affect the WebSocket Gateway connection?).
+    *   **Context Awareness**: Before modifying server.ts, ALWAYS cross-reference config.ts to ensure new flags (like sessionMode) are properly propagated.
 
 2.  **Implementation Standards**:
     *   **Validation**: Every external input (HTTP body, env var, config file) MUST be validated with Zod.
