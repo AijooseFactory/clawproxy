@@ -63,7 +63,7 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
 
     } catch (err) {
         server.log.error(err, 'Failed to connect to Gateway');
-        process.exit(1);
+        throw err;
     }
 
     // Auth Middleware

@@ -12,6 +12,15 @@ const start = async () => {
         if (config.apiKey) {
             console.log('Authentication enabled (API Key required)');
         }
+
+        const shutdown = async (signal: string) => {
+            console.log(`Received ${signal}. Shutting down gracefully...`);
+            await server.close();
+            process.exit(0);
+        };
+
+        process.on('SIGINT', () => shutdown('SIGINT'));
+        process.on('SIGTERM', () => shutdown('SIGTERM'));
     } catch (err) {
         server.log.error(err);
         process.exit(1);
