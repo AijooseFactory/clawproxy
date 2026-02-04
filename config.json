@@ -1,0 +1,5 @@
+{
+    "httpPort": 8081,
+    "apiKey": "sk-clawproxy-test-key",
+    "verbose": true
+}
