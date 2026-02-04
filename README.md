@@ -112,6 +112,19 @@ ClawProxy prioritizes configuration in this order:
 }
 ```
 
+## Token Management (Gateway Connectivity)
+
+ClawProxy requires a valid **Gateway Token** to connect to the OpenClaw Gateway. **This token is generated and managed by the OpenClaw Gateway**, not by ClawProxy.
+
+### How to Find Your Token
+1.  **Check your `.env` file**: Look for `OPENCLAW_GATEWAY_TOKEN` in the `.env` file where your OpenClaw Gateway is installed.
+2.  **Check Gateway Logs**: When you start the OpenClaw Gateway, the token is printed to the console.
+
+### How to Create or Reset a Token
+Since the token is an authentication secret for the Gateway, you cannot create one inside ClawProxy.
+- **To generate a new token**: You must perform this action on the Gateway (e.g., by clearing the existing token from the Gateway's configuration and restarting it).
+- **Hardcoding**: Never commit this token to code. Always use environment variables (`CLAWPROXY_GATEWAY_TOKEN`) or the `config.json` (which is git-ignored).
+
 ## Usage
 
 ### 1. Start OpenClaw
