@@ -1,7 +1,0 @@
-services:
-  openclaw-gateway:
-    volumes:
-      - /Users/george/Dottie:/home/node/Dottie:rw
-  openclaw-cli:
-    volumes:
-      - /Users/george/Dottie:/home/node/Dottie:rw

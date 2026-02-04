@@ -1,0 +1,7 @@
+services:
+  openclaw-gateway:
+    volumes:
+      - ./path/to/your/code:/home/node/code:rw
+  openclaw-cli:
+    volumes:
+      - ./path/to/your/code:/home/node/code:rw
