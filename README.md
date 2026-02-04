@@ -118,6 +118,8 @@ ClawProxy prioritizes configuration in this order:
 Ensure your OpenClaw Gateway is running. Note the Gateway Token from your `.env` or startup logs.
 
 ### 2. Start ClawProxy
+> **Where is my token?** You can find your gateway token in your OpenClaw `.env` file under the key `OPENCLAW_GATEWAY_TOKEN`, or in the output logs when you start the OpenClaw Gateway.
+
 ```bash
 export CLAWPROXY_GATEWAY_TOKEN="your-token-here"
 npm start
