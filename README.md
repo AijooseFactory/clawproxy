@@ -53,6 +53,9 @@ node dist/index.js
 ```bash
 docker build -t clawproxy .
 docker run -p 8080:8080 -e CLAWPROXY_GATEWAY_TOKEN="your-token" clawproxy
+# Notes: 
+# - The container exposes port 8080 and listens on 0.0.0.0 by default.
+# - It includes a built-in healthcheck.
 ```
 
 ## Configuration
@@ -75,7 +78,7 @@ ClawProxy prioritizes configuration in this order:
 | **Default Model**| `--model` | `CLAWPROXY_DEFAULT_MODEL`| `defaultModel` | `dev` |
 | **Verbose Logs** | `--verbose` | `CLAWPROXY_VERBOSE` | `verbose` | `false` |
 
-> **Warning**: For `httpHost`, only use `0.0.0.0` for remote access if you have properly secured your network and enabled `apiKey` authentication.
+> **Warning**: The default `httpHost` is `127.0.0.1` for Node.js usage (for security) but `0.0.0.0` inside Docker. If running effectively remotely, secure your network and use `apiKey` authentication.
 
 ### Configuration Example (`config.json`)
 ```json

@@ -37,7 +37,7 @@ export class GatewayClient {
     public onEvent: ((evt: EventFrame) => void) | null = null;
 
     constructor(opts?: GatewayClientOptions) {
-        this.url = opts?.url ?? "ws://127.0.0.1:18789";
+        this.url = opts?.url ?? "ws://127.0.0.1:19001";
         this.token = opts?.token;
         this.deviceIdentity = loadOrCreateDeviceIdentity();
     }
