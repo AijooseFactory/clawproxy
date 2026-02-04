@@ -71,3 +71,8 @@ export type HelloOk = {
         tickIntervalMs?: number;
     };
 };
+
+export type ApprovalRequest = {
+    runId: string;
+    message?: string;
+};

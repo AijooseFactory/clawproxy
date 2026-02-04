@@ -191,6 +191,14 @@ export class GatewayClient extends EventEmitter {
         return this.requestRaw<T>(method, params);
     }
 
+    public async approveRun(runId: string): Promise<void> {
+        return this.request('agent.approve', { runId });
+    }
+
+    public async fetchSkills(agentId: string): Promise<any[]> {
+        return this.request('agent.skills', { agentId });
+    }
+
     private async requestRaw<T>(method: string, params?: any): Promise<T> {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
             throw new Error("Not connected");

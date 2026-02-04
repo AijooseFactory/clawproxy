@@ -16,6 +16,7 @@ ClawProxy is a lightweight OpenAI-compatible API proxy for [OpenClaw](https://gi
 - **Gateway Integration**: Connects directly to the OpenClaw Gateway via WebSocket (Protocol v3) with auto-reconnect.
 - **Docker Ready**: Includes a production-optimized Dockerfile.
 - **Health Monitoring**: Built-in `/health` endpoint.
+- **Persistent Logic**: Requires a long-running process (Docker/Node.js) to handle OpenClaw sessions and confirmations. **Not compatible with Serverless** (Lambda/Vercel) as-is.
 
 ## Installation
 
@@ -77,6 +78,10 @@ services:
 
 > **Cloud Deployment**: For platforms like Railway, Fly.io, or Render, simply deploy this repository or push the Docker image to a registry. Set the `CLAWPROXY_GATEWAY_TOKEN` environment variable in your cloud provider's dashboard.
 
+## Security & Confirmations
+
+See [SECURITY.md](./SECURITY.md) for details on how ClawProxy handles OpenClaw's permission requests and architecture.
+
 ## Configuration
 
 ClawProxy prioritizes configuration in this order:
@@ -96,6 +101,22 @@ ClawProxy prioritizes configuration in this order:
 | **Gateway Token**| `--gateway-token`| `CLAWPROXY_GATEWAY_TOKEN`| `gatewayToken`| (None) |
 | **Default Model**| `--model` | `CLAWPROXY_DEFAULT_MODEL`| `defaultModel` | `dev` |
 | **Verbose Logs** | `--verbose` | `CLAWPROXY_VERBOSE` | `verbose` | `false` |
+
+### 🔐 API Key Authentication (`CLAWPROXY_API_KEY`)
+
+**Why use it?**
+If you expose ClawProxy to a network (by setting host to `0.0.0.0` or running in Docker), anyone on that network can use your agents. Setting an API Key adds a requirement for clients to provide a `Bearer` token.
+
+**Why NOT use it?**
+If you are running strictly on `127.0.0.1` (localhost) and you trust the users on your computer, you can leave it blank for easier setup.
+
+**How to generate one?**
+You can use any string, but a random secret is best:
+```bash
+openssl rand -hex 32
+# Output example: 8f3a9...
+```
+Set this as `CLAWPROXY_API_KEY=8f3a9...` and configure your client (SillyTavern/OpenWebUI) to use the same key.
 
 > **Warning**: The default `httpHost` is `127.0.0.1` for Node.js usage (for security) but `0.0.0.0` inside Docker. If running effectively remotely, secure your network and use `apiKey` authentication.
 

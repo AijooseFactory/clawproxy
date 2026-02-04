@@ -1,7 +1,10 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { GatewayClient } from './lib/client';
+import { StreamProcessor } from './lib/stream-processor';
+import { mapSkillsToTools } from './lib/tools-handler';
 import { type ClawProxyConfig } from './config';
+import { type ApprovalRequest } from './lib/types';
 
 export type ServerOptions = {
     port: number;
@@ -31,6 +34,26 @@ const ChatCompletionSchema = z.object({
 export async function createServer(config: ClawProxyConfig): Promise<FastifyInstance> {
     const server = Fastify({
         logger: config.verbose ? { level: 'debug' } : { level: 'info' }
+    });
+
+    // Store pending approvals: sessionKey -> { runId, timestamp }
+    const pendingApprovals = new Map<string, { runId: string, timestamp: number }>();
+
+    // Clean up stale pending approvals every hour (3600000 ms)
+    const cleanupInterval = setInterval(() => {
+        const now = Date.now();
+        for (const [key, value] of pendingApprovals.entries()) {
+            if (now - value.timestamp > 3600000) { // 1 hour TTL
+                pendingApprovals.delete(key);
+                if (config.verbose) server.log.debug({ sessionKey: key }, 'Cleaned up stale pending approval');
+            }
+        }
+    }, 3600000);
+
+    // Ensure interval is cleared on close
+    server.addHook('onClose', (_instance, done) => {
+        clearInterval(cleanupInterval);
+        done();
     });
 
     // Initialize Gateway Client
@@ -142,6 +165,27 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
         };
     });
 
+    // Tools Endpoint (Dynamic Mapping)
+    server.get('/v1/tools', async (request, reply) => {
+        const { agentId } = request.query as { agentId?: string };
+        const targetAgent = agentId || config.defaultModel;
+
+        try {
+            const skills = await client.fetchSkills(targetAgent);
+            const tools = mapSkillsToTools(skills);
+            return {
+                object: 'list',
+                data: tools
+            };
+        } catch (err: any) {
+            server.log.warn({ err }, 'Failed to fetch tools');
+            return {
+                object: 'list',
+                data: []
+            };
+        }
+    });
+
     server.post('/v1/chat/completions', async (request, reply) => {
         const parseResult = ChatCompletionSchema.safeParse(request.body);
 
@@ -168,7 +212,8 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
         const agentId = model!;
 
         const id = `chatcmpl-${Date.now()}`;
-        const sessionKey = `agent:${agentId}:main`;
+        // Ensure session is user-specific if provided, otherwise shared default
+        const sessionKey = body.user ? `agent:${agentId}:${body.user}` : `agent:${agentId}:main`;
 
         if (stream) {
             reply.raw.setHeader('Content-Type', 'text/event-stream');
@@ -176,11 +221,48 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
             reply.raw.setHeader('Connection', 'keep-alive');
 
             let runId: string | null = null;
+            let isResuming = false;
+            const streamProcessor = new StreamProcessor();
+
+            // Check if we are approving a pending action
+            if (pendingApprovals.has(sessionKey)) {
+                const pending = pendingApprovals.get(sessionKey)!;
+                // strict check for "APPROVE"
+                if (lastMessage.content.trim().toUpperCase() === 'APPROVE') {
+                    if (config.verbose) server.log.info({ sessionKey, runId: pending.runId }, 'User approved pending action');
+                    pendingApprovals.delete(sessionKey);
+                    runId = pending.runId;
+                    isResuming = true;
+                } else {
+                    // User said something else. Depending on OpenClaw behavior, 
+                    // this might be a new conversation turn or might need to cancel the previous run?
+                    // For now, we assume sending a new message implicitly cancels or confuses the agent, 
+                    // but we will proceed as a new run request unless it's strictly APPROVE.
+                    // We'll clear the local pending state to avoid getting stuck.
+                    if (config.verbose) server.log.info({ sessionKey }, 'User did not approve, clearing pending state');
+                    pendingApprovals.delete(sessionKey);
+                }
+            }
 
             const eventHandler = (evt: any) => {
-                if (evt.event === 'agent' && evt.payload?.runId === runId) {
+                // Match by RunID OR by SessionKey if we are still waiting for the RunID
+                const isTargetRun = evt.payload?.runId === runId;
+                const isTargetSession = runId === null && evt.payload?.sessionKey === sessionKey;
+
+                if (evt.event === 'agent' && (isTargetRun || isTargetSession)) {
+
+                    // Critical: If we matched by session, capture the runId now so we lock onto it
+                    if (!runId && evt.payload?.runId) {
+                        runId = evt.payload.runId;
+                    }
+
                     const payload = evt.payload;
-                    if (payload.delta) {
+
+                    // Handle Confirmation Request
+                    if (payload.status === 'requires_confirmation') {
+                        if (config.verbose) server.log.info({ sessionKey, runId }, 'Agent requires confirmation');
+
+                        const msg = "\n\n⚠️ **[SYSTEM NOTICE]** The agent needs your approval to proceed. Please reply with **APPROVE** to authorize the action.";
                         const chunk = {
                             id,
                             object: 'chat.completion.chunk',
@@ -188,11 +270,61 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                             model: agentId,
                             choices: [{
                                 index: 0,
-                                delta: { content: payload.delta },
+                                delta: { content: msg },
                                 finish_reason: null
                             }]
                         };
                         reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`);
+
+                        // Store state
+                        pendingApprovals.set(sessionKey, { runId: runId!, timestamp: Date.now() });
+
+                        // End the stream so the user can reply
+                        const finishChunk = {
+                            id,
+                            object: 'chat.completion.chunk',
+                            created: Date.now(),
+                            model: agentId,
+                            choices: [{
+                                index: 0,
+                                delta: {},
+                                finish_reason: 'stop'
+                            }]
+                        };
+                        reply.raw.write(`data: ${JSON.stringify(finishChunk)}\n\n`);
+                        reply.raw.write('data: [DONE]\n\n');
+
+                        client.off('event', eventHandler);
+                        reply.raw.end();
+                        return;
+                    }
+
+                    if (payload.delta) {
+                        // Process for thoughts
+                        const { content, thought } = streamProcessor.process(payload.delta, payload.type);
+
+                        // If we have content, send it
+                        if (content) {
+                            const chunk = {
+                                id,
+                                object: 'chat.completion.chunk',
+                                created: Date.now(),
+                                model: agentId,
+                                choices: [{
+                                    index: 0,
+                                    delta: { content: content },
+                                    finish_reason: null
+                                }]
+                            };
+                            reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                        }
+
+                        // If we have thought, we could send it as a separate field if the client supports it (e.g. reasoning_content)
+                        // Or we just swallow it to keep stability.
+                        // Ideally we log it or send it as a comment if Debug mode?
+                        if (thought && config.verbose) {
+                            server.log.debug({ thought }, 'Agent Thought');
+                        }
                     }
                     if (payload.status === 'done' || payload.status === 'error') {
                         const finishReason = payload.status === 'error' ? 'stop' : 'stop';
@@ -226,16 +358,24 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
             });
 
             try {
-                if (config.verbose) {
-                    server.log.debug({ agentId, sessionKey, id }, 'Sending agent request (stream)');
+                if (isResuming && runId) {
+                    if (config.verbose) {
+                        server.log.debug({ agentId, sessionKey, runId }, 'Resuming agent run (approval)');
+                    }
+                    await client.approveRun(runId);
+                    // No new runId, we keep the old one and just wait for events
+                } else {
+                    if (config.verbose) {
+                        server.log.debug({ agentId, sessionKey, id }, 'Sending agent request (stream)');
+                    }
+                    const res = await client.request<{ runId: string, status: string }>('agent', {
+                        agentId,
+                        message: lastMessage.content,
+                        sessionKey,
+                        idempotencyKey: id
+                    });
+                    runId = res.runId;
                 }
-                const res = await client.request<{ runId: string, status: string }>('agent', {
-                    agentId,
-                    message: lastMessage.content,
-                    sessionKey,
-                    idempotencyKey: id
-                });
-                runId = res.runId;
             } catch (err: any) {
                 server.log.error(err);
                 client.off('event', eventHandler); // Ensure cleanup on immediate error
@@ -260,12 +400,44 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
             // Non-streaming
             let fullContent = "";
             let runId: string | null = null;
+            let isResuming = false;
+
+            // Check if we are approving a pending action (shared logic with streaming, but scoped locally here)
+            if (pendingApprovals.has(sessionKey)) {
+                const pending = pendingApprovals.get(sessionKey)!;
+                if (lastMessage.content.trim().toUpperCase() === 'APPROVE') {
+                    if (config.verbose) server.log.info({ sessionKey, runId: pending.runId }, 'User approved pending action (non-stream)');
+                    pendingApprovals.delete(sessionKey);
+                    runId = pending.runId;
+                    isResuming = true;
+                } else {
+                    if (config.verbose) server.log.info({ sessionKey }, 'User did not approve, clearing pending state');
+                    pendingApprovals.delete(sessionKey);
+                }
+            }
 
             const donePromise = new Promise<void>((resolve, reject) => {
                 const eventHandler = (evt: any) => {
-                    if (evt.event === 'agent' && evt.payload?.runId === runId) {
+                    // Match by RunID OR by SessionKey if we are still waiting for the RunID
+                    const isTargetRun = evt.payload?.runId === runId;
+                    const isTargetSession = runId === null && evt.payload?.sessionKey === sessionKey;
+
+                    if (evt.event === 'agent' && (isTargetRun || isTargetSession)) {
+
+                        // Critical: If we matched by session, capture the runId now so we lock onto it
+                        if (!runId && evt.payload?.runId) {
+                            runId = evt.payload.runId;
+                        }
+
                         if (evt.payload.delta) {
                             fullContent += evt.payload.delta;
+                        }
+                        if (evt.payload.status === 'requires_confirmation') {
+                            if (config.verbose) server.log.info({ sessionKey, runId }, 'Agent requires confirmation (non-stream)');
+                            fullContent = "\n\n⚠️ **[SYSTEM NOTICE]** The agent needs your approval to proceed. Please reply with **APPROVE** to authorize the action.";
+                            pendingApprovals.set(sessionKey, { runId: runId!, timestamp: Date.now() });
+                            client.off('event', eventHandler);
+                            resolve();
                         }
                         if (evt.payload.status === 'done') {
                             client.off('event', eventHandler);
@@ -291,15 +463,23 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
             }
 
             try {
-                const res = await client.request<{ runId: string, status: string }>('agent', {
-                    agentId,
-                    message: lastMessage.content,
-                    sessionKey,
-                    idempotencyKey: id
-                });
-                runId = res.runId;
+                if (isResuming && runId) {
+                    if (config.verbose) {
+                        server.log.debug({ agentId, sessionKey, runId }, 'Resuming agent run (approval) - non-stream');
+                    }
+                    await client.approveRun(runId);
+                    await donePromise;
+                } else {
+                    const res = await client.request<{ runId: string, status: string }>('agent', {
+                        agentId,
+                        message: lastMessage.content,
+                        sessionKey,
+                        idempotencyKey: id
+                    });
+                    runId = res.runId;
 
-                await donePromise;
+                    await donePromise;
+                }
 
                 return {
                     id,
