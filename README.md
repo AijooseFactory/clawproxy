@@ -1,5 +1,4 @@
-# ClawProxy 
- ⭐
+# ClawProxy ⭐
 
 ![ClawProxy Banner](src/assets/clawproxy-banner.png)
 
