@@ -9,7 +9,7 @@ ClawProxy is a lightweight OpenAI-compatible API proxy for [OpenClaw](https://gi
 
 ## Features
 
-- **Standard OpenAI API**: Exposes `/v1/models` and `/v1/chat/completions`.
+- **Agents as Models**: Dynamically exposes your active OpenClaw Agents as selectable "Custom Models" compatible with any standard OpenAI client (OpenWebUI, SillyTavern, etc.).
 - **Streaming Support**: Full Server-Sent Events (SSE) support for real-time token streaming.
 - **Secure**: Optional API Key authentication and local binding.
 - **Flexible Configuration**: Configure via JSON file, environment variables, or CLI flags.
