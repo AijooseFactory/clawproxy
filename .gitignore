@@ -4,3 +4,4 @@ dist
 .DS_Store
 coverage
 docker-compose.extra.yml
+config.json

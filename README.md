@@ -82,6 +82,12 @@ services:
 
 See [SECURITY.md](./SECURITY.md) for details on how ClawProxy handles OpenClaw's permission requests and architecture.
 
+### Rejection & Feedback
+If you reply with anything **other** than "APPROVE" (e.g., "No", "Stop", or "Use a different file"):
+1. The pending action is cancelled (removed from proxy state).
+2. Your reply is sent to the Agent as a **new message**.
+3. The Agent will process this as feedback and continue the conversation (e.g., apologizing or asking for different instructions).
+
 ## Configuration
 
 ClawProxy prioritizes configuration in this order:

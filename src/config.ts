@@ -15,6 +15,7 @@ export interface ClawProxyConfig {
     apiKey?: string;
     defaultModel: string;
     verbose: boolean;
+    sessionMode: 'passthrough' | 'stateful';
 }
 
 const DEFAULT_CONFIG: ClawProxyConfig = {
@@ -23,6 +24,7 @@ const DEFAULT_CONFIG: ClawProxyConfig = {
     httpHost: '127.0.0.1',
     defaultModel: 'dev',
     verbose: false,
+    sessionMode: 'passthrough'
 };
 
 export async function loadConfig(): Promise<ClawProxyConfig> {
@@ -36,6 +38,7 @@ export async function loadConfig(): Promise<ClawProxyConfig> {
         .option('api-key', { type: 'string', description: 'Optional Client API Key' })
         .option('model', { type: 'string', description: 'Default model/agent ID' })
         .option('verbose', { type: 'boolean', description: 'Verbose logging' })
+        .option('session-mode', { type: 'string', choices: ['passthrough', 'stateful'], description: 'Session handling mode' })
         .help()
         .argv as any; // Type assertion simplification
 
@@ -71,7 +74,8 @@ export async function loadConfig(): Promise<ClawProxyConfig> {
         httpHost: process.env.CLAWPROXY_HOST,
         apiKey: process.env.CLAWPROXY_API_KEY,
         defaultModel: process.env.CLAWPROXY_DEFAULT_MODEL,
-        verbose: process.env.CLAWPROXY_VERBOSE === 'true'
+        verbose: process.env.CLAWPROXY_VERBOSE === 'true',
+        sessionMode: process.env.CLAWPROXY_SESSION_MODE as 'passthrough' | 'stateful'
     };
 
     // Remove undefined env values
@@ -84,7 +88,8 @@ export async function loadConfig(): Promise<ClawProxyConfig> {
         httpHost: argv.host,
         apiKey: argv['api-key'],
         defaultModel: argv.model,
-        verbose: argv.verbose
+        verbose: argv.verbose,
+        sessionMode: argv['session-mode']
     };
 
     // Remove undefined cli values

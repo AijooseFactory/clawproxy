@@ -23,7 +23,8 @@ describe('Server', () => {
         httpPort: 0,
         httpHost: '127.0.0.1',
         defaultModel: 'dev',
-        verbose: false
+        verbose: false,
+        sessionMode: 'passthrough'
     };
 
     let server: FastifyInstance;

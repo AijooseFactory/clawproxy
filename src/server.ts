@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify';
+import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { GatewayClient } from './lib/client';
 import { StreamProcessor } from './lib/stream-processor';
@@ -39,13 +40,24 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
     // Store pending approvals: sessionKey -> { runId, timestamp }
     const pendingApprovals = new Map<string, { runId: string, timestamp: number }>();
 
-    // Clean up stale pending approvals every hour (3600000 ms)
+    // Session Map: localSessionKey -> { remoteSessionId, timestamp }
+    const sessionMap = new Map<string, { remoteSessionId: string, timestamp: number }>();
+
+    // Clean up stale pending approvals and sessions every hour
     const cleanupInterval = setInterval(() => {
         const now = Date.now();
+        // Cleanup Pending Approvals (1 hour TTL)
         for (const [key, value] of pendingApprovals.entries()) {
-            if (now - value.timestamp > 3600000) { // 1 hour TTL
+            if (now - value.timestamp > 3600000) {
                 pendingApprovals.delete(key);
                 if (config.verbose) server.log.debug({ sessionKey: key }, 'Cleaned up stale pending approval');
+            }
+        }
+        // Cleanup Session Map (24 hour TTL)
+        for (const [key, value] of sessionMap.entries()) {
+            if (now - value.timestamp > 86400000) { // 24 hours
+                sessionMap.delete(key);
+                if (config.verbose) server.log.debug({ sessionKey: key }, 'Cleaned up stale session map');
             }
         }
     }, 3600000);
@@ -215,6 +227,54 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
         // Ensure session is user-specific if provided, otherwise shared default
         const sessionKey = body.user ? `agent:${agentId}:${body.user}` : `agent:${agentId}:main`;
 
+        // Smart Session Logic
+        let sessionData = sessionMap.get(sessionKey);
+        let remoteSessionId = sessionData?.remoteSessionId;
+
+        // Is New Chat? (Standard heuristic: System + User or just User start)
+        // If messages length is small, we assume it's a new conversation or a reset.
+        // Or if we don't have a remoteSessionId yet.
+        const isNewChat = messages.length <= 2 || !remoteSessionId;
+
+        if (isNewChat) {
+            remoteSessionId = randomUUID();
+            sessionMap.set(sessionKey, { remoteSessionId, timestamp: Date.now() });
+            if (config.verbose) server.log.info({ sessionKey, remoteSessionId }, 'Started new Smart Session');
+        } else if (sessionData) {
+            // Update timestamp on access to keep session alive
+            sessionData.timestamp = Date.now();
+        }
+
+        const effectiveSessionId = remoteSessionId!;
+
+        // Prepare Message Content based on Mode
+        let messagePayload = "";
+
+        if (config.sessionMode === 'stateful') {
+            // Context Stripping: Only send the LAST message
+            messagePayload = lastMessage.content;
+
+            // Check for System Prompt on New Chat
+            if (isNewChat) {
+                const systemMsg = messages.find(m => m.role === 'system');
+                if (systemMsg) {
+                    messagePayload = `System: ${systemMsg.content}\n\nUser: ${messagePayload}`;
+                }
+            }
+
+            if (config.verbose) server.log.debug('Mode: Stateful (Stripped context)');
+        } else {
+            // Passthrough: Send FULL formatted history
+            // We format it as a string because OpenClaw Gateway 'agent' event typically expects a string message string
+            // unless we update the protocol to support 'messages' array.
+            // Following plan: Format as "ROLE: Content"
+            messagePayload = messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n');
+            if (config.verbose) server.log.debug('Mode: Passthrough (Full history)');
+        }
+
+        // NOTE: We use 'effectiveSessionId' as the 'sessionKey' sent to OpenClaw
+        // This ensures the agent sees a consistent persistent ID even if the user is stateless.
+
         if (stream) {
             reply.raw.setHeader('Content-Type', 'text/event-stream');
             reply.raw.setHeader('Cache-Control', 'no-cache');
@@ -368,10 +428,11 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                     if (config.verbose) {
                         server.log.debug({ agentId, sessionKey, id }, 'Sending agent request (stream)');
                     }
+                    // Use messagePayload and effectiveSessionId determined earlier
                     const res = await client.request<{ runId: string, status: string }>('agent', {
                         agentId,
-                        message: lastMessage.content,
-                        sessionKey,
+                        message: messagePayload,
+                        sessionKey: effectiveSessionId,
                         idempotencyKey: id
                     });
                     runId = res.runId;
@@ -417,6 +478,12 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
             }
 
             const donePromise = new Promise<void>((resolve, reject) => {
+                // Timeout to prevent hanging indefinitely
+                const timer = setTimeout(() => {
+                    client.off('event', eventHandler);
+                    reject(new Error("Agent execution timed out"));
+                }, 60000); // 60s timeout
+
                 const eventHandler = (evt: any) => {
                     // Match by RunID OR by SessionKey if we are still waiting for the RunID
                     const isTargetRun = evt.payload?.runId === runId;
@@ -436,15 +503,18 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                             if (config.verbose) server.log.info({ sessionKey, runId }, 'Agent requires confirmation (non-stream)');
                             fullContent = "\n\n⚠️ **[SYSTEM NOTICE]** The agent needs your approval to proceed. Please reply with **APPROVE** to authorize the action.";
                             pendingApprovals.set(sessionKey, { runId: runId!, timestamp: Date.now() });
+                            clearTimeout(timer);
                             client.off('event', eventHandler);
                             resolve();
                         }
                         if (evt.payload.status === 'done') {
+                            clearTimeout(timer);
                             client.off('event', eventHandler);
                             resolve();
                         }
                         if (evt.payload.status === 'error') {
                             fullContent += " [Error from Agent]";
+                            clearTimeout(timer);
                             client.off('event', eventHandler);
                             resolve();
                         }
@@ -453,9 +523,11 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
 
                 client.on('event', eventHandler);
 
-                // Timeout safety for listener cleanup?
-                // The client request timeout handles the initial request, but if agent hangs...
-                // We'll rely on global timeout or user disconnect for now.
+                // Handle client disconnect to avoid leaks
+                request.raw.on('close', () => {
+                    clearTimeout(timer);
+                    client.off('event', eventHandler);
+                });
             });
 
             if (config.verbose) {
@@ -472,8 +544,8 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                 } else {
                     const res = await client.request<{ runId: string, status: string }>('agent', {
                         agentId,
-                        message: lastMessage.content,
-                        sessionKey,
+                        message: messagePayload,
+                        sessionKey: effectiveSessionId,
                         idempotencyKey: id
                     });
                     runId = res.runId;
@@ -500,7 +572,17 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                         total_tokens: 0
                     }
                 };
-            } catch (err) {
+            } catch (err: any) {
+                // Map specific gateway errors to 400
+                if (err.message && (err.message.includes('unknown agent') || err.message.includes('invalid agent'))) {
+                    return reply.code(400).send({
+                        error: {
+                            message: err.message,
+                            type: 'invalid_request_error',
+                            code: 'model_not_found'
+                        }
+                    });
+                }
                 throw err;
             }
         }
