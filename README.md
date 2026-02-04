@@ -1,5 +1,7 @@
 # ClawProxy
 
+![ClawProxy Banner](src/assets/clawproxy-banner.png)
+
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-green)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
