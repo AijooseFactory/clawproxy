@@ -26,19 +26,29 @@ const CLIENT_ID = "gateway-client";
 const CLIENT_MODE = "backend";
 const CLIENT_ROLE = "operator";
 
-export class GatewayClient {
+interface GatewayEvents {
+    'message': [any];
+    'event': [EventFrame];
+    'error': [Error];
+    'close': [];
+}
+
+import { EventEmitter } from 'events';
+
+export class GatewayClient extends EventEmitter {
     private ws: WebSocket | null = null;
     private url: string;
     private token?: string;
     private deviceIdentity: DeviceIdentity;
     private pending = new Map<string, { resolve: (val: any) => void; reject: (err: any) => void }>();
     private connectNonce: string | null = null;
-
-    public onEvent: ((evt: EventFrame) => void) | null = null;
+    private requestTimeoutMs: number;
 
     constructor(opts?: GatewayClientOptions) {
+        super();
         this.url = opts?.url ?? "ws://127.0.0.1:19001";
         this.token = opts?.token;
+        this.requestTimeoutMs = opts?.requestTimeoutMs ?? 30000;
         this.deviceIdentity = loadOrCreateDeviceIdentity();
     }
 
@@ -57,8 +67,6 @@ export class GatewayClient {
         } catch (err) {
             const delay = Math.min(1000 * Math.pow(2, retries), 30000);
             console.error(`GatewayClient: Connection failed, retrying in ${delay}ms...`, err);
-            // Don't sleep if we are just starting, maybe? No, we should sleep on failure.
-            // But we need to keep the process alive? fastify key logic handles errors.
             await new Promise(res => setTimeout(res, delay));
             return this.connectWithRetry(retries + 1);
         }
@@ -79,23 +87,19 @@ export class GatewayClient {
                 });
 
                 this.ws.on('error', (err) => {
-                    // Only reject if we are strictly connecting. 
-                    // If we are established, this will be handled by 'close'
+                    this.emit('error', err);
                     if (this.ws?.readyState === WebSocket.CONNECTING) {
                         reject(err);
-                    } else {
-                        console.error('WebSocket Error:', err);
                     }
                 });
 
                 this.ws.on('close', () => {
+                    this.emit('close');
                     console.warn('GatewayClient: WebSocket closed. Reconnecting...');
                     this.ws = null;
                     if (this.isConnected) {
                         // Should not happen if closed
                     } else {
-                        // Trigger retry loop if not explicitly stopped?
-                        // For now, let's just retry
                         setTimeout(() => this.connectWithRetry(), 1000);
                     }
                 });
@@ -112,6 +116,8 @@ export class GatewayClient {
         const raw = data.toString();
         try {
             const parsed = JSON.parse(raw);
+            this.emit('message', parsed);
+
             if (parsed.type === "res") {
                 const res = parsed as ResponseFrame;
                 if (this.pending.has(res.id)) {
@@ -127,12 +133,9 @@ export class GatewayClient {
                 const evt = parsed as EventFrame;
                 if (evt.event === "connect.challenge") {
                     this.connectNonce = (evt.payload as any).nonce;
-                    // We need to re-send connect. 
-                    // Note: sendConnect returns a promise that resolves to HelloOk.
-                    // We don't have anyone waiting for this promise usually when it's a challenge during re-connect?
-                    this.sendConnect().catch(console.error);
+                    this.sendConnect().catch(err => console.error("Re-connect failed", err));
                 } else {
-                    if (this.onEvent) this.onEvent(evt);
+                    this.emit('event', evt);
                 }
             }
         } catch (err) {
@@ -201,9 +204,6 @@ export class GatewayClient {
         return new Promise<T>((resolve, reject) => {
             this.pending.set(id, { resolve, reject });
 
-            // Debug Log
-            // console.log('WS Send:', JSON.stringify(frame));
-
             this.ws!.send(JSON.stringify(frame));
 
             setTimeout(() => {
@@ -211,7 +211,7 @@ export class GatewayClient {
                     this.pending.delete(id);
                     reject(new Error("Timeout"));
                 }
-            }, 10000);
+            }, this.requestTimeoutMs);
         });
     }
 }

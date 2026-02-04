@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify';
+import { z } from 'zod';
 import { GatewayClient } from './lib/client';
 import { type ClawProxyConfig } from './config';
 
@@ -8,6 +9,17 @@ export type ServerOptions = {
     gatewayUrl: string;
     gatewayToken?: string;
 };
+
+const ChatCompletionSchema = z.object({
+    model: z.string().optional(),
+    messages: z.array(z.object({
+        role: z.enum(['system', 'user', 'assistant', 'tool']),
+        content: z.string(),
+    })).min(1),
+    stream: z.boolean().optional(),
+    user: z.string().optional(),
+    // Allow other optional fields but don't validate them strictly to avoid breaking clients sending extra params
+}).passthrough();
 
 export async function createServer(config: ClawProxyConfig): Promise<FastifyInstance> {
     const server = Fastify({
@@ -20,12 +32,20 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
         token: config.gatewayToken
     });
 
+    client.on('error', (err) => {
+        server.log.error(err, 'Gateway Client Error');
+    });
+
+    client.on('close', () => {
+        server.log.warn('Gateway Client Disconnected');
+    });
+
     // Connect to Gateway on startup
     try {
         await client.start();
         server.log.info('Connected to OpenClaw Gateway');
 
-        // Log available agents
+        // Log available agents - try/catch for safety
         try {
             const result = await client.request<{ agents: { id: string, name?: string }[] }>('agents.list');
             const agentNames = result.agents.map(a => `${a.name || a.id} (${a.id})`).join(', ');
@@ -73,11 +93,6 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
     // Routes
     server.get('/v1/models', async (_request, reply) => {
         try {
-            // Fetch agents from Gateway
-            // The method is agents.list or models.list? 
-            // Based on hello-ok, 'models.list' and 'agents.list' are available.
-            // OpenAI expects exact structure.
-
             const result = await client.request<{ agents: { id: string, name?: string }[] }>('agents.list');
 
             const data = result.agents.map(agent => ({
@@ -121,59 +136,37 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
     });
 
     server.post('/v1/chat/completions', async (request, reply) => {
-        const body = request.body as any;
+        const parseResult = ChatCompletionSchema.safeParse(request.body);
+
+        if (!parseResult.success) {
+            return reply.code(400).send({
+                error: {
+                    message: `Invalid request: ${parseResult.error.message}`,
+                    type: 'invalid_request_error'
+                }
+            });
+        }
+
+        const body = parseResult.data;
         let model = body.model;
-        const messages = body.messages as { role: string, content: string }[];
+        const messages = body.messages;
         const stream = body.stream === true;
-
-        // Log unsupported parameters in verbose mode
-        if (config.verbose) {
-            const supported = ['model', 'messages', 'stream', 'user'];
-            const ignored = Object.keys(body).filter(k => !supported.includes(k));
-            if (ignored.length > 0) {
-                server.log.warn(`Ignored unsupported parameters: ${ignored.join(', ')}`);
-            }
-        }
-
-        if (!messages || messages.length === 0) {
-            return reply.code(400).send({ error: { message: 'Messages are required', type: 'invalid_request_error' } });
-        }
-
         const lastMessage = messages[messages.length - 1];
-        if (lastMessage.role !== 'user') {
-            return reply.code(400).send({ error: { message: 'Last message must be from user', type: 'invalid_request_error' } });
-        }
 
         // Determine Agent ID
         // If model is generic or empty, use default
         if (!model || model === 'gpt-3.5-turbo' || model === 'gpt-4') {
             model = config.defaultModel;
         }
-        const agentId = model;
+        const agentId = model!;
 
-        // Create a completion ID
         const id = `chatcmpl-${Date.now()}`;
-
-        // Note: We are treating this as a simple "send message" to the agent.
-        // We are NOT forcing a full conversation history unless we need to sync it.
-        // OpenClaw agents have their own memory. 
-        // We will just send the user's latest message to the agent.
+        const sessionKey = `agent:${agentId}:main`;
 
         if (stream) {
             reply.raw.setHeader('Content-Type', 'text/event-stream');
             reply.raw.setHeader('Cache-Control', 'no-cache');
             reply.raw.setHeader('Connection', 'keep-alive');
-
-            // Subscribe to agent events
-            // Problem: How do we isolate THIS request's response?
-            // OpenClaw's `agent` request returns a `runId`.
-            // Events for that run will contain the `runId`.
-
-            const sessionKey = `agent:${agentId}:main`; // Assuming main session
-
-            // We need a way to correlate.
-            // 1. Send 'agent' request. It returns { runId, status: 'accepted' }
-            // 2. Listen for 'agent' events with that runId.
 
             let runId: string | null = null;
 
@@ -185,7 +178,7 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                             id,
                             object: 'chat.completion.chunk',
                             created: Date.now(),
-                            model,
+                            model: agentId,
                             choices: [{
                                 index: 0,
                                 delta: { content: payload.delta },
@@ -195,12 +188,12 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                         reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`);
                     }
                     if (payload.status === 'done' || payload.status === 'error') {
-                        const finishReason = payload.status === 'error' ? 'stop' : 'stop'; // 'stop' usually
+                        const finishReason = payload.status === 'error' ? 'stop' : 'stop';
                         const chunk = {
                             id,
                             object: 'chat.completion.chunk',
                             created: Date.now(),
-                            model,
+                            model: agentId,
                             choices: [{
                                 index: 0,
                                 delta: {},
@@ -209,43 +202,42 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                         };
                         reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`);
                         reply.raw.write('data: [DONE]\n\n');
-                        // Clean up logic would be here if extended client supported unsubscription
+
+                        // Cleanup listener
+                        client.off('event', eventHandler);
                         reply.raw.end();
                     }
                 }
             };
 
-            // HACK: Multi-listener support needed in GatewayClient
-            // Current GatewayClient.onEvent is a single callback.
-            // We need to upgrade GatewayClient to be an EventEmitter or similar.
-            // For MVP V0.1, we'll hacked it or upgrade it.
-            // Let's assume we upgrade client first or just patch it here.
+            // Register listener
+            client.on('event', eventHandler);
 
-            // Upgrading on the fly:
-            const originalOnEvent = client.onEvent;
-            client.onEvent = (evt) => {
-                if (originalOnEvent) originalOnEvent(evt);
-                eventHandler(evt);
-            };
+            // Handle client disconnect to avoid leaks
+            request.raw.on('close', () => {
+                client.off('event', eventHandler);
+            });
 
             try {
                 if (config.verbose) {
-                    console.log('Sending agent request:', { agentId, message: lastMessage.content, sessionKey, idempotencyKey: id });
+                    server.log.debug({ agentId, sessionKey, id }, 'Sending agent request (stream)');
                 }
                 const res = await client.request<{ runId: string, status: string }>('agent', {
                     agentId,
-                    message: lastMessage.content, // Provide raw content
+                    message: lastMessage.content,
                     sessionKey,
                     idempotencyKey: id
                 });
                 runId = res.runId;
             } catch (err: any) {
                 server.log.error(err);
+                client.off('event', eventHandler); // Ensure cleanup on immediate error
+
                 const chunk = {
                     id,
                     object: 'chat.completion.chunk',
                     created: Date.now(),
-                    model,
+                    model: agentId,
                     choices: [{
                         index: 0,
                         delta: { content: `Error: ${err.message || 'Unknown agent error'}` },
@@ -258,12 +250,9 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
             }
 
         } else {
-            // Non-streaming - wait for completion
-            // Same logic but buffer.
-
+            // Non-streaming
             let fullContent = "";
             let runId: string | null = null;
-            const sessionKey = `agent:${agentId}:main`;
 
             const donePromise = new Promise<void>((resolve, reject) => {
                 const eventHandler = (evt: any) => {
@@ -272,26 +261,28 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                             fullContent += evt.payload.delta;
                         }
                         if (evt.payload.status === 'done') {
+                            client.off('event', eventHandler);
                             resolve();
                         }
                         if (evt.payload.status === 'error') {
-                            // If error, we still resolve to return what we have? 
-                            // Or we can append error text.
                             fullContent += " [Error from Agent]";
+                            client.off('event', eventHandler);
                             resolve();
                         }
                     }
                 };
-                const originalOnEvent = client.onEvent;
-                client.onEvent = (evt) => {
-                    if (originalOnEvent) originalOnEvent(evt);
-                    eventHandler(evt);
-                };
+
+                client.on('event', eventHandler);
+
+                // Timeout safety for listener cleanup?
+                // The client request timeout handles the initial request, but if agent hangs...
+                // We'll rely on global timeout or user disconnect for now.
             });
 
             if (config.verbose) {
-                console.log('Sending agent request (non-stream):', { agentId, message: lastMessage.content, sessionKey, idempotencyKey: id });
+                server.log.debug({ agentId, sessionKey, id }, 'Sending agent request (non-stream)');
             }
+
             try {
                 const res = await client.request<{ runId: string, status: string }>('agent', {
                     agentId,
@@ -307,7 +298,7 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                     id,
                     object: 'chat.completion',
                     created: Date.now(),
-                    model,
+                    model: agentId,
                     choices: [{
                         index: 0,
                         message: {
@@ -318,7 +309,7 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                     }],
                     usage: {
                         prompt_tokens: 0,
-                        completion_tokens: 0, // TODO: Count tokens?
+                        completion_tokens: 0,
                         total_tokens: 0
                     }
                 };
