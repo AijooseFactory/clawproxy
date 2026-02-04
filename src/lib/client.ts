@@ -66,7 +66,7 @@ export class GatewayClient extends EventEmitter {
             console.log('GatewayClient: Connected successfully');
         } catch (err) {
             const delay = Math.min(1000 * Math.pow(2, retries), 30000);
-            console.error(`GatewayClient: Connection failed, retrying in ${delay}ms...`, err);
+            console.error(`GatewayClient: Connection failed (Attempt ${retries + 1}), retrying in ${delay}ms...`, err);
             await new Promise(res => setTimeout(res, delay));
             return this.connectWithRetry(retries + 1);
         }
@@ -75,9 +75,11 @@ export class GatewayClient extends EventEmitter {
     private connect(): Promise<void> {
         return new Promise((resolve, reject) => {
             try {
+                console.log(`GatewayClient: Connecting to ${this.url}...`);
                 this.ws = new WebSocket(this.url);
 
                 this.ws.on('open', () => {
+                    console.log('GatewayClient: WebSocket open, sending connect payload...');
                     this.sendConnect().then(() => {
                         resolve();
                     }).catch(err => {
