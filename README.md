@@ -167,6 +167,16 @@ ClawProxy is tested with:
 
 *Note: Tool calling passthrough is not currently supported; the proxy handles text interaction while the agent executes tools internally.*
 
+
+## Contributing
+
+ClawProxy uses strict TypeScript and modern best practices:
+- **Strict Typing**: All code must pass `tsc` with `strict: true` (implied).
+- **Validation**: API requests are validated using `zod`.
+- **Events**: Internal event handling uses `EventEmitter` rather than callbacks.
+
+Please ensure `npm run build` passes before submitting PRs.
+
 ## License
 
 MIT

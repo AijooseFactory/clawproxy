@@ -18,6 +18,13 @@ const ChatCompletionSchema = z.object({
     })).min(1),
     stream: z.boolean().optional(),
     user: z.string().optional(),
+    temperature: z.number().optional(),
+    top_p: z.number().optional(),
+    n: z.number().optional(),
+    max_tokens: z.number().optional(),
+    presence_penalty: z.number().optional(),
+    frequency_penalty: z.number().optional(),
+    stop: z.union([z.string(), z.array(z.string())]).optional(),
     // Allow other optional fields but don't validate them strictly to avoid breaking clients sending extra params
 }).passthrough();
 
