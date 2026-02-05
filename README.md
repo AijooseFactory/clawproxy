@@ -10,7 +10,8 @@ ClawProxy is a lightweight OpenAI-compatible API proxy for [OpenClaw](https://gi
 ## Features
 
 - **Agents as Models**: Dynamically exposes your active OpenClaw Agents as selectable "Custom Models" compatible with any standard OpenAI client (OpenWebUI, SillyTavern, etc.).
-- **Streaming Support**: Full Server-Sent Events (SSE) support for real-time token streaming.
+- **Streaming Support**: Full Server-Sent Events (SSE) support with anti-buffering headers for instant token delivery.
+- **CORS Support**: Built-in Cross-Origin Resource Sharing allowing web clients (browsers) to connect directly.
 - **Secure**: Optional API Key authentication and local binding.
 - **Flexible Configuration**: Configure via JSON file, environment variables, or CLI flags.
 - **Gateway Integration**: Connects directly to the OpenClaw Gateway via WebSocket (Protocol v3) with auto-reconnect.
@@ -214,7 +215,7 @@ ClawProxy uses strict TypeScript and modern best practices:
 - **Validation**: API requests are validated using `zod`.
 - **Events**: Internal event handling uses `EventEmitter` rather than callbacks.
 
-Please ensure `npm run build` passes before submitting PRs.
+This project uses **Husky** to enforce quality. `npm run build` runs automatically before every commit to prevent broken builds.
 
 ## License
 

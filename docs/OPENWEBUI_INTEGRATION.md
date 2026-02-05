@@ -157,7 +157,7 @@ However, this is less precise than ClawProxy's `stateful` mode.
 
 ### Response shows as black dot/loading indicator
 - **Cause**: Streaming format incompatibility
-- **Fix**: ClawProxy includes a streaming fix. Rebuild with latest code.
+- **Fix**: Resolved by anti-buffering headers (`X-Accel-Buffering: no`) and robust stream handling in the latest build. Ensure you are running the latest version.
 
 ### ClawProxy shows "connected: false"
 - **Cause**: WebSocket authentication issue between ClawProxy and Gateway
