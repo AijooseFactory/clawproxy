@@ -6,6 +6,8 @@ import { StreamProcessor } from './lib/stream-processor';
 import { mapSkillsToTools } from './lib/tools-handler';
 import { type ClawProxyConfig } from './config';
 import { type ApprovalRequest } from './lib/types';
+import cors from '@fastify/cors';
+import { PassThrough } from 'stream';
 
 export type ServerOptions = {
     port: number;
@@ -35,6 +37,11 @@ const ChatCompletionSchema = z.object({
 export async function createServer(config: ClawProxyConfig): Promise<FastifyInstance> {
     const server = Fastify({
         logger: config.verbose ? { level: 'debug' } : { level: 'info' }
+    });
+
+    await server.register(cors, {
+        origin: '*',
+        methods: ['GET', 'POST', 'OPTIONS']
     });
 
     // Store pending approvals: sessionKey -> { runId, timestamp }
@@ -82,24 +89,24 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
         server.log.warn('Gateway Client Disconnected');
     });
 
-    // Connect to Gateway on startup
-    try {
-        await client.start();
+    // Connect to Gateway on startup (in background)
+    client.start().then(() => {
         server.log.info('Connected to OpenClaw Gateway');
 
-        // Log available agents - try/catch for safety
-        try {
-            const result = await client.request<{ agents: { id: string, name?: string }[] }>('agents.list');
-            const agentNames = result.agents.map(a => `${a.name || a.id} (${a.id})`).join(', ');
-            server.log.info(`Available Agents: ${agentNames}`);
-        } catch (err) {
-            server.log.warn('Failed to fetch initial agent list');
-        }
-
-    } catch (err) {
-        server.log.error(err, 'Failed to connect to Gateway');
-        throw err;
-    }
+        // Log available agents
+        client.request<{ agents: { id: string, name?: string }[] }>('agents.list')
+            .then(result => {
+                const agentNames = result.agents.map(a => `${a.name || a.id} (${a.id})`).join(', ');
+                server.log.info(`Available Agents: ${agentNames}`);
+            })
+            .catch(err => {
+                server.log.warn('Failed to fetch initial agent list');
+            });
+    }).catch(err => {
+        // This catch might not be reached if connectWithRetry loops forever, 
+        // but it's good practice.
+        server.log.error(err, 'Gateway connection failed (background)');
+    });
 
     // Auth Middleware
     server.addHook('onRequest', async (request, reply) => {
@@ -276,12 +283,20 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
         // This ensures the agent sees a consistent persistent ID even if the user is stateless.
 
         if (stream) {
-            reply.raw.setHeader('Content-Type', 'text/event-stream');
-            reply.raw.setHeader('Cache-Control', 'no-cache');
-            reply.raw.setHeader('Connection', 'keep-alive');
+            reply.header('Content-Type', 'text/event-stream');
+            reply.header('Cache-Control', 'no-cache');
+            reply.header('Connection', 'keep-alive');
+            reply.header('X-Accel-Buffering', 'no'); // Prevent Nginx buffering
+
+            const stream = new PassThrough();
+            reply.send(stream);
+
+            // Force flush headers
+            stream.write(': start\n\n');
 
             let runId: string | null = null;
             let isResuming = false;
+            let hasStartedContent = false; // Track if we've sent the initial role chunk
             const streamProcessor = new StreamProcessor();
 
             // Check if we are approving a pending action
@@ -305,15 +320,21 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
             }
 
             const eventHandler = (evt: any) => {
+                // debug log every event
+                console.log('DEBUG: Event received', evt.event, JSON.stringify(evt.payload).substring(0, 100));
+
                 // Match by RunID OR by SessionKey if we are still waiting for the RunID
+                // Note: Gateway uses effectiveSessionId (the UUID we sent), not our local sessionKey
                 const isTargetRun = evt.payload?.runId === runId;
-                const isTargetSession = runId === null && evt.payload?.sessionKey === sessionKey;
+                const isTargetSession = runId === null && evt.payload?.sessionKey === effectiveSessionId;
 
                 if (evt.event === 'agent' && (isTargetRun || isTargetSession)) {
+                    console.log('DEBUG: Event matched', evt.payload?.stream);
 
                     // Critical: If we matched by session, capture the runId now so we lock onto it
                     if (!runId && evt.payload?.runId) {
                         runId = evt.payload.runId;
+                        console.log('DEBUG: Captured RunID', runId);
                     }
 
                     const payload = evt.payload;
@@ -321,7 +342,6 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                     // Handle Confirmation Request
                     if (payload.status === 'requires_confirmation') {
                         if (config.verbose) server.log.info({ sessionKey, runId }, 'Agent requires confirmation');
-
                         const msg = "\n\n⚠️ **[SYSTEM NOTICE]** The agent needs your approval to proceed. Please reply with **APPROVE** to authorize the action.";
                         const chunk = {
                             id,
@@ -334,12 +354,8 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                                 finish_reason: null
                             }]
                         };
-                        reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`);
-
-                        // Store state
+                        stream.write(`data: ${JSON.stringify(chunk)}\n\n`);
                         pendingApprovals.set(sessionKey, { runId: runId!, timestamp: Date.now() });
-
-                        // End the stream so the user can reply
                         const finishChunk = {
                             id,
                             object: 'chat.completion.chunk',
@@ -351,20 +367,39 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                                 finish_reason: 'stop'
                             }]
                         };
-                        reply.raw.write(`data: ${JSON.stringify(finishChunk)}\n\n`);
-                        reply.raw.write('data: [DONE]\n\n');
-
+                        stream.write(`data: ${JSON.stringify(finishChunk)}\n\n`);
+                        stream.write('data: [DONE]\n\n');
                         client.off('event', eventHandler);
-                        reply.raw.end();
+                        stream.end();
                         return;
                     }
 
-                    if (payload.delta) {
+                    // Handle Content
+                    if (payload.stream === 'assistant' && payload.data?.delta) {
+                        const delta = payload.data.delta;
+                        console.log('DEBUG: Processing delta', delta);
                         // Process for thoughts
-                        const { content, thought } = streamProcessor.process(payload.delta, payload.type);
+                        const { content, thought } = streamProcessor.process(delta, payload.type);
 
                         // If we have content, send it
                         if (content) {
+                            // Send initial role chunk on first content (OpenWebUI compatibility)
+                            if (!hasStartedContent) {
+                                hasStartedContent = true;
+                                const roleChunk = {
+                                    id,
+                                    object: 'chat.completion.chunk',
+                                    created: Date.now(),
+                                    model: agentId,
+                                    choices: [{
+                                        index: 0,
+                                        delta: { role: 'assistant', content: '' },
+                                        finish_reason: null
+                                    }]
+                                };
+                                stream.write(`data: ${JSON.stringify(roleChunk)}\n\n`);
+                            }
+
                             const chunk = {
                                 id,
                                 object: 'chat.completion.chunk',
@@ -376,19 +411,56 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                                     finish_reason: null
                                 }]
                             };
-                            reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                            stream.write(`data: ${JSON.stringify(chunk)}\n\n`);
                         }
 
-                        // If we have thought, we could send it as a separate field if the client supports it (e.g. reasoning_content)
-                        // Or we just swallow it to keep stability.
-                        // Ideally we log it or send it as a comment if Debug mode?
-                        if (thought && config.verbose) {
-                            server.log.debug({ thought }, 'Agent Thought');
+                        // If we have thought, send it (using proper tool/thought format or custom field)
+                        if (thought) {
+                            if (config.verbose) server.log.debug({ thought }, 'Streaming thought');
+                        }
+                    } else if (payload.delta) {
+                        // BACKWARD COMPATIBILITY
+                        const { content } = streamProcessor.process(payload.delta, payload.type);
+                        if (content) {
+                            if (!hasStartedContent) {
+                                hasStartedContent = true;
+                                const roleChunk = {
+                                    id,
+                                    object: 'chat.completion.chunk',
+                                    created: Date.now(),
+                                    model: agentId,
+                                    choices: [{
+                                        index: 0,
+                                        delta: { role: 'assistant', content: '' },
+                                        finish_reason: null
+                                    }]
+                                };
+                                stream.write(`data: ${JSON.stringify(roleChunk)}\n\n`);
+                            }
+                            const chunk = {
+                                id,
+                                object: 'chat.completion.chunk',
+                                created: Date.now(),
+                                model: agentId,
+                                choices: [{
+                                    index: 0,
+                                    delta: { content: content },
+                                    finish_reason: null
+                                }]
+                            };
+                            stream.write(`data: ${JSON.stringify(chunk)}\n\n`);
                         }
                     }
-                    if (payload.status === 'done' || payload.status === 'error') {
-                        const finishReason = payload.status === 'error' ? 'stop' : 'stop';
-                        const chunk = {
+
+                    // Handle Completion
+                    const isLifecycleEnd = payload.stream === 'lifecycle' && payload.data?.phase === 'end';
+                    const isLifecycleError = payload.stream === 'lifecycle' && payload.data?.phase === 'error';
+                    const isStatusDone = payload.status === 'done';
+                    const isStatusError = payload.status === 'error';
+
+                    if (isLifecycleEnd || isStatusDone || isLifecycleError || isStatusError) {
+                        console.log('DEBUG: Request done', isLifecycleEnd ? 'lifecycle' : 'status');
+                        const finishChunk = {
                             id,
                             object: 'chat.completion.chunk',
                             created: Date.now(),
@@ -396,66 +468,74 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                             choices: [{
                                 index: 0,
                                 delta: {},
-                                finish_reason: finishReason
+                                finish_reason: 'stop'
                             }]
                         };
-                        reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`);
-                        reply.raw.write('data: [DONE]\n\n');
+                        stream.write(`data: ${JSON.stringify(finishChunk)}\n\n`);
+                        stream.write('data: [DONE]\n\n');
 
                         // Cleanup listener
                         client.off('event', eventHandler);
-                        reply.raw.end();
+                        stream.end();
                     }
                 }
             };
 
             // Register listener
+            console.log('DEBUG: Registering event listener. Session:', effectiveSessionId);
             client.on('event', eventHandler);
+            console.log('DEBUG: Listener count:', client.listenerCount('event'));
 
-            // Handle client disconnect to avoid leaks
-            request.raw.on('close', () => {
+            // Handle stream closure (client disconnect or finished)
+            stream.on('close', () => {
+                if (config.verbose) server.log.debug({ sessionKey }, 'Stream closed, removing listener');
                 client.off('event', eventHandler);
             });
 
-            try {
-                if (isResuming && runId) {
-                    if (config.verbose) {
-                        server.log.debug({ agentId, sessionKey, runId }, 'Resuming agent run (approval)');
+            // Start request logic (async)
+            (async () => {
+                try {
+                    if (isResuming && runId) {
+                        if (config.verbose) {
+                            server.log.debug({ agentId, sessionKey, runId }, 'Resuming agent run (approval)');
+                        }
+                        await client.approveRun(runId);
+                        // No new runId, we keep the old one and just wait for events
+                    } else {
+                        if (config.verbose) {
+                            server.log.debug({ agentId, sessionKey, id }, 'Sending agent request (stream)');
+                        }
+                        // Use messagePayload and effectiveSessionId determined earlier
+                        const res = await client.request<{ runId: string, status: string }>('agent', {
+                            agentId,
+                            message: messagePayload,
+                            sessionKey: effectiveSessionId,
+                            idempotencyKey: id
+                        });
+                        runId = res.runId;
                     }
-                    await client.approveRun(runId);
-                    // No new runId, we keep the old one and just wait for events
-                } else {
-                    if (config.verbose) {
-                        server.log.debug({ agentId, sessionKey, id }, 'Sending agent request (stream)');
-                    }
-                    // Use messagePayload and effectiveSessionId determined earlier
-                    const res = await client.request<{ runId: string, status: string }>('agent', {
-                        agentId,
-                        message: messagePayload,
-                        sessionKey: effectiveSessionId,
-                        idempotencyKey: id
-                    });
-                    runId = res.runId;
-                }
-            } catch (err: any) {
-                server.log.error(err);
-                client.off('event', eventHandler); // Ensure cleanup on immediate error
+                } catch (err: any) {
+                    server.log.error(err);
+                    client.off('event', eventHandler); // Ensure cleanup on immediate error
 
-                const chunk = {
-                    id,
-                    object: 'chat.completion.chunk',
-                    created: Date.now(),
-                    model: agentId,
-                    choices: [{
-                        index: 0,
-                        delta: { content: `Error: ${err.message || 'Unknown agent error'}` },
-                        finish_reason: "stop"
-                    }]
-                };
-                reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`);
-                reply.raw.write('data: [DONE]\n\n');
-                reply.raw.end();
-            }
+                    const chunk = {
+                        id,
+                        object: 'chat.completion.chunk',
+                        created: Date.now(),
+                        model: agentId,
+                        choices: [{
+                            index: 0,
+                            delta: { content: `Error: ${err.message || 'Unknown agent error'}` },
+                            finish_reason: "stop"
+                        }]
+                    };
+                    stream.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                    stream.write('data: [DONE]\n\n');
+                    stream.end();
+                }
+            })();
+
+            return reply;
 
         } else {
             // Non-streaming
@@ -486,8 +566,9 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
 
                 const eventHandler = (evt: any) => {
                     // Match by RunID OR by SessionKey if we are still waiting for the RunID
+                    // Note: Gateway uses effectiveSessionId (the UUID we sent), not our local sessionKey
                     const isTargetRun = evt.payload?.runId === runId;
-                    const isTargetSession = runId === null && evt.payload?.sessionKey === sessionKey;
+                    const isTargetSession = runId === null && evt.payload?.sessionKey === effectiveSessionId;
 
                     if (evt.event === 'agent' && (isTargetRun || isTargetSession)) {
 
@@ -496,9 +577,6 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                             runId = evt.payload.runId;
                         }
 
-                        if (evt.payload.delta) {
-                            fullContent += evt.payload.delta;
-                        }
                         if (evt.payload.status === 'requires_confirmation') {
                             if (config.verbose) server.log.info({ sessionKey, runId }, 'Agent requires confirmation (non-stream)');
                             fullContent = "\n\n⚠️ **[SYSTEM NOTICE]** The agent needs your approval to proceed. Please reply with **APPROVE** to authorize the action.";
@@ -507,12 +585,36 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                             client.off('event', eventHandler);
                             resolve();
                         }
-                        if (evt.payload.status === 'done') {
+
+                        const p = evt.payload;
+
+                        // Content chunks
+                        if (p.stream === 'assistant' && p.data?.delta) {
+                            fullContent += p.data.delta;
+                        }
+
+                        // Completion event
+                        if (p.stream === 'lifecycle' && p.data?.phase === 'end') {
                             clearTimeout(timer);
                             client.off('event', eventHandler);
                             resolve();
                         }
-                        if (evt.payload.status === 'error') {
+
+                        // Error event
+                        if (p.stream === 'lifecycle' && p.data?.phase === 'error') {
+                            fullContent += " [Error from Agent]";
+                            clearTimeout(timer);
+                            client.off('event', eventHandler);
+                            resolve();
+                        }
+
+                        // Legacy/Alternative status check (just in case)
+                        if (p.status === 'done') {
+                            clearTimeout(timer);
+                            client.off('event', eventHandler);
+                            resolve();
+                        }
+                        if (p.status === 'error') {
                             fullContent += " [Error from Agent]";
                             clearTimeout(timer);
                             client.off('event', eventHandler);

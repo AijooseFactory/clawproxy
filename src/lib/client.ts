@@ -44,8 +44,11 @@ export class GatewayClient extends EventEmitter {
     private connectNonce: string | null = null;
     private requestTimeoutMs: number;
 
+    private instanceId = Math.random().toString(36).substring(7);
+
     constructor(opts?: GatewayClientOptions) {
         super();
+        console.log(`DEBUG: GatewayClient initialized [${this.instanceId}]`);
         this.url = opts?.url ?? "ws://127.0.0.1:19001";
         this.token = opts?.token;
         this.requestTimeoutMs = opts?.requestTimeoutMs ?? 30000;
@@ -66,7 +69,7 @@ export class GatewayClient extends EventEmitter {
             console.log('GatewayClient: Connected successfully');
         } catch (err) {
             const delay = Math.min(1000 * Math.pow(2, retries), 30000);
-            console.error(`GatewayClient: Connection failed (Attempt ${retries + 1}), retrying in ${delay}ms...`, err);
+            console.error(`GatewayClient: Connection failed(Attempt ${retries + 1}), retrying in ${delay}ms...`, err);
             await new Promise(res => setTimeout(res, delay));
             return this.connectWithRetry(retries + 1);
         }
@@ -78,20 +81,35 @@ export class GatewayClient extends EventEmitter {
                 console.log(`GatewayClient: Connecting to ${this.url}...`);
                 this.ws = new WebSocket(this.url);
 
+                // Timeout for initial connection handshake
+                const handshakeTimeout = setTimeout(() => {
+                    if (this.ws?.readyState === WebSocket.OPEN) {
+                        this.ws.close();
+                    }
+                    reject(new Error("Connection handshake timed out"));
+                }, 15000); // Increased timeout to 15 seconds
+
+                let connectStarted = false;
+
+                const finishConnect = () => {
+                    clearTimeout(handshakeTimeout);
+                    resolve();
+                };
+
+                const failConnect = (err: any) => {
+                    clearTimeout(handshakeTimeout);
+                    reject(err);
+                };
+
                 this.ws.on('open', () => {
-                    console.log('GatewayClient: WebSocket open, sending connect payload...');
-                    this.sendConnect().then(() => {
-                        resolve();
-                    }).catch(err => {
-                        reject(err);
-                        this.ws?.close();
-                    });
+                    console.log('GatewayClient: WebSocket open, waiting for challenge...');
+                    // Don't send connect immediately - wait for challenge event
                 });
 
                 this.ws.on('error', (err) => {
                     this.emit('error', err);
                     if (this.ws?.readyState === WebSocket.CONNECTING) {
-                        reject(err);
+                        failConnect(err);
                     }
                 });
 
@@ -102,11 +120,61 @@ export class GatewayClient extends EventEmitter {
                     if (this.isConnected) {
                         // Should not happen if closed
                     } else {
+                        // If we were still connecting, this rejects the promise
+                        failConnect(new Error("WebSocket closed during connection"));
                         setTimeout(() => this.connectWithRetry(), 1000);
                     }
                 });
 
-                this.ws.on('message', (data: WebSocket.Data) => this.handleMessage(data));
+                this.ws.on('message', (data: WebSocket.Data) => {
+                    const msg = data.toString();
+                    console.log('DEBUG: Client WS received', msg.substring(0, 200));
+                    try {
+                        const parsed = JSON.parse(msg);
+                        this.emit('message', parsed);
+
+                        if (parsed.type === "res") {
+                            const res = parsed as ResponseFrame;
+                            if (this.pending.has(res.id)) {
+                                const p = this.pending.get(res.id)!;
+                                this.pending.delete(res.id);
+                                if (res.ok) {
+                                    p.resolve(res.payload);
+                                } else {
+                                    p.reject(new Error(res.error?.message || "Error"));
+                                }
+                            }
+                        } else if (parsed.type === "event") {
+                            const evt = parsed as EventFrame;
+                            console.log('DEBUG: Client processing event', evt.event);
+                            if (evt.event === "connect.challenge") {
+                                // Gateway sent challenge - now we can connect
+                                console.log('GatewayClient: Received challenge, sending connect...');
+                                this.connectNonce = (evt.payload as any).nonce;
+                                if (!connectStarted) {
+                                    connectStarted = true;
+                                    this.sendConnect()
+                                        .then(() => {
+                                            console.log('GatewayClient: Connected successfully!');
+                                            finishConnect();
+                                        })
+                                        .catch(err => {
+                                            console.error('GatewayClient: Connect failed:', err.message);
+                                            failConnect(err);
+                                        });
+                                }
+                            }
+
+                            // Always emit the event so listeners can handle it (including agent events)
+                            const listenerCount = this.listenerCount('event');
+                            console.log(`DEBUG: [${this.instanceId}] Client emitting event '${evt.event}'. Listener count: ${listenerCount}`);
+                            const emitted = this.emit('event', evt);
+                            console.log(`DEBUG: [${this.instanceId}] Emit result: ${emitted}`);
+                        }
+                    } catch (err) {
+                        console.error("Message parse error", err);
+                    }
+                });
 
             } catch (err) {
                 reject(err);
@@ -114,7 +182,7 @@ export class GatewayClient extends EventEmitter {
         });
     }
 
-    private handleMessage(data: WebSocket.Data) {
+    private handleMessage(data: WebSocket.Data, onConnectSuccess?: () => void) {
         const raw = data.toString();
         try {
             const parsed = JSON.parse(raw);
@@ -135,7 +203,11 @@ export class GatewayClient extends EventEmitter {
                 const evt = parsed as EventFrame;
                 if (evt.event === "connect.challenge") {
                     this.connectNonce = (evt.payload as any).nonce;
-                    this.sendConnect().catch(err => console.error("Re-connect failed", err));
+                    this.sendConnect()
+                        .then(() => {
+                            if (onConnectSuccess) onConnectSuccess();
+                        })
+                        .catch(err => console.error("Re-connect failed", err));
                 } else {
                     this.emit('event', evt);
                 }

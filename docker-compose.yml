@@ -1,0 +1,29 @@
+services:
+  clawproxy:
+    build: .
+    image: openclaw-clawproxy
+    container_name: openclaw-clawproxy
+    ports:
+      - "8080:8080"
+    environment:
+      - CLAWPROXY_VERBOSE=true
+      - CLAWPROXY_PORT=8080
+      - CLAWPROXY_HOST=0.0.0.0
+      - CLAWPROXY_GATEWAY_URL=ws://openclaw-openclaw-gateway-1:18789
+      - CLAWPROXY_GATEWAY_TOKEN=0e7f291807301da5357968349d1b6fd9f2ea048390f6e04e
+      - CLAWPROXY_API_KEY=sk-clawproxy-test-key
+      - CLAWPROXY_SESSION_MODE=stateful
+      - HOME=/home/node
+    volumes:
+      - clawproxy-identity:/home/node/.openclaw
+    networks:
+      - openclaw_default
+    restart: always
+
+volumes:
+  clawproxy-identity:
+
+
+networks:
+  openclaw_default:
+    external: true

@@ -1,0 +1,1 @@
+This is a separate GitHub repository from OpenClaw. It is a proxy server that allows you to connect to multiple or single OpenClaw instances and route requests to them just like using Telegram, but for ANY OpenAI compatible API.
