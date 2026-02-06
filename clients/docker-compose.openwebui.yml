@@ -4,12 +4,13 @@ services:
     container_name: open-webui
     volumes:
       - open-webui:/app/backend/data
+      - ./env.py:/app/backend/open_webui/env.py
     ports:
       - "3000:8080"
     environment:
       - OPENAI_API_BASE_URL=http://host.docker.internal:8080/v1
       - OPENAI_API_KEY=sk-clawproxy-test-key
-      - WEBUI_NAME=Dottie (OpenClaw)
+      - WEBUI_NAME=${WEBUI_NAME:-Open WebUI}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always
