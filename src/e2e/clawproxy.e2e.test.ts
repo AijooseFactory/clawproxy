@@ -3,6 +3,7 @@ import { createServer } from '../server';
 import { ClawProxyConfig } from '../config';
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
 import { FastifyInstance } from 'fastify';
+import { MockGateway } from './mock-gateway';
 
 const GATEWAY_URL = 'ws://127.0.0.1:19001';
 // Token from env
@@ -11,6 +12,7 @@ const GATEWAY_TOKEN = process.env.CLAWPROXY_GATEWAY_TOKEN;
 describe('E2E: ClawProxy -> OpenClaw Gateway', () => {
     let server: FastifyInstance;
     let agentId: string;
+    let mockGateway: MockGateway;
 
     const config: ClawProxyConfig = {
         gatewayUrl: GATEWAY_URL,
@@ -23,13 +25,32 @@ describe('E2E: ClawProxy -> OpenClaw Gateway', () => {
     };
 
     beforeAll(async () => {
+        // Start Mock Gateway
+        mockGateway = new MockGateway(19001);
+        await mockGateway.start();
+
         console.log('Starting E2E Server connecting to:', GATEWAY_URL);
         server = await createServer(config);
         await server.ready();
+
+        // Wait for gateway connection
+        let retries = 0;
+        while (retries < 20) {
+            const res = await server.inject({ method: 'GET', url: '/health' });
+            const health = JSON.parse(res.payload);
+            if (health.connected) {
+                console.log('E2E: Gateway connected successfully');
+                break;
+            }
+            await new Promise(r => setTimeout(r, 500));
+            retries++;
+        }
+        if (retries >= 20) throw new Error('Failed to connect to Mock Gateway');
     });
 
     afterAll(async () => {
         await server.close();
+        await mockGateway.stop();
     });
 
     it('should list models from the real gateway', async () => {
@@ -69,7 +90,7 @@ describe('E2E: ClawProxy -> OpenClaw Gateway', () => {
         expect(response.statusCode).toBe(400);
         const body = JSON.parse(response.payload);
         expect(body.error.code).toBe('model_not_found');
-    });
+    }, 30000);
 
     it('should handle chat completion (success or timeout handled)', async () => {
         if (!agentId) {
@@ -99,10 +120,7 @@ describe('E2E: ClawProxy -> OpenClaw Gateway', () => {
         const body = JSON.parse(response.payload);
         console.log('Chat Response:', JSON.stringify(body, null, 2));
 
-        if (response.statusCode === 200) {
-            expect(body.choices[0].message.content).toBeTruthy();
-        } else {
-            expect(body.error.message).toMatch(/timed out/i);
-        }
+        expect(response.statusCode).toBe(200);
+        expect(body.choices[0].message.content).toContain('Hello from Mock!');
     }, 70000); // 70s timeout to allow server 60s timeout to trigger
 });
