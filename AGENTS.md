@@ -25,6 +25,12 @@ This document serves as a "context beacon" for AI agents (specifically Claude an
 * **Confirmation Loop:** Security confirmations (`requires_confirmation`) MUST pause the stream and inject a System Notice. Never auto-approve sensitive actions.
 * **Race Condition Locking:** Event handlers MUST capture `runId` immediately to prevent race conditions. Do not rely solely on late-arriving metadata.
 
+### 2.2 Build Integrity & CI Guidelines (MANDATORY)
+* **Husky Hooks:** You MUST obey the configured Husky hooks. `npm test` runs before every commit.
+    * **No Force Pushing:** Do not bypass hooks with `--no-verify`.
+    * **Fix Before Commit:** If tests fail, fix them locally. NEVER result in a broken CI build appearing on GitHub.
+* **Mock Requirements:** E2E tests in CI require `MockGateway` (or similar mocks) since external services are not available.
+
 ---
 
 ## 3. Instructions for Claude
