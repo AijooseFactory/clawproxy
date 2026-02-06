@@ -196,8 +196,8 @@ If ClawProxy cannot connect to the Gateway via WebSocket:
 
 4. **Restart both services after changes**:
    ```bash
-   cd ~/Dottie/openclaw && docker compose down && docker compose up -d
-   cd ~/Dottie/clawproxy && docker compose down && docker compose up -d
+   cd /path/to/openclaw && docker compose down && docker compose up -d
+   cd /path/to/clawproxy && docker compose down && docker compose up -d
    ```
 
 ---
