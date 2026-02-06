@@ -1,52 +1,76 @@
-# Dependencies
-node_modules
+# ----------------------
+# Core Dependencies
+# ----------------------
+node_modules/
 .pnp
 .pnp.js
 
-# Testing
-coverage
-.nyc_output
+# ----------------------
+# Build & Output
+# ----------------------
+dist/
+build/
+out/
+coverage/
+.nyc_output/
 
-# Production
-dist
-build
-out
-
-# Misc
-.DS_Store
+# ----------------------
+# Environment & Secrets
+# ----------------------
 .env
+.env.*
+!.env.example
 clients/.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+clients/.env.*
+!clients/.env.example
 
-# Logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-logs
-*.log
-pids
-*.pid
-*.seed
-*.pid.lock
+# ----------------------
+# Local Development Override
+# ----------------------
+docker-compose.override.yml
+docker-compose.extra.yml
+config.json
 
-# Editor directories and files
-.idea
-.vscode
+# ----------------------
+# Backups & Temp Files
+# ----------------------
 *.swp
 *.swo
 *.swn
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pids
+*.pid
+*.pid.lock
+*.seed
 *.tgz
+clients/env.py.original
+*.bak
 
-# OS
+# ----------------------
+# Python (env.py helpers)
+# ----------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ----------------------
+# Editor / IDE
+# ----------------------
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# ----------------------
+# Operating System
+# ----------------------
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
-
-# Docker
-docker-compose.override.yml
-docker-compose.extra.yml
-
-# Project specific
-config.json
