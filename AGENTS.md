@@ -31,6 +31,17 @@ This document serves as a "context beacon" for AI agents (specifically Claude an
     * **Fix Before Commit:** If tests fail, fix them locally. NEVER result in a broken CI build appearing on GitHub.
 * **Mock Requirements:** E2E tests in CI require `MockGateway` (or similar mocks) since external services are not available.
 
+### 2.3 Build Integrity & Husky Protocol (RED LINE)
+> [!IMPORTANT]
+> **STRICT COMPLIANCE REQUIRED:** The build integrity system is non-negotiable.
+
+* **Husky Hooks:** This repository uses Husky to enforce quality checks. The `pre-commit` hook automatically runs `npm test`.
+* **Zero Broken Builds:** You **MUST** ensure all tests pass locally before verifying your work.
+* **Prohibited Actions:**
+    *   **NEVER** use `git commit --no-verify` to bypass hooks.
+    *   **NEVER** force push broken code.
+* **Recovery:** If the hook blocks your commit, read the error log, fix the failing test, and try again. **Do not disable the hook.**
+
 ---
 
 ## 3. Instructions for Claude
