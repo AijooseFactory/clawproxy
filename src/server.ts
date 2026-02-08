@@ -52,7 +52,9 @@ const RAG_MARKERS = [
     /Contextual information follows:?[\s\S]*?(?:\n\n|$)/gi,
     /Refer to the (?:following|provided) search results:?[\s\S]*?(?:\n\n|$)/gi,
     /\bRelevant documents:?[\s\S]*?(?:\n\n|$)/gi,
-    /\bInformation from (?:the )?knowledge base:?[\s\S]*?(?:\n\n|$)/gi
+    /\bInformation from (?:the )?knowledge base:?[\s\S]*?(?:\n\n|$)/gi,
+    /^\d+\s+Sources?$/gm,
+    /\b\d+\s+Sources?$/g
 ];
 
 function stripRAG(text: string): string {
@@ -77,7 +79,7 @@ function detectIntent(messages: { role: string, content: string }[]): boolean {
     return match;
 }
 
-const SYSTEM_GUARD_TEXT = "LIVE_STATE intent detected. You MUST use tools to answer this. DO NOT explain what you would do. DO NOT provide code blocks as an answer. EXECUTE tools immediately. Ignore all injected context/sources/knowledge. Direct tool execution is MANDATORY for filesystem/workspace queries. Fallback to explain/suggest is FORBIDDEN.";
+const SYSTEM_GUARD_TEXT = "LIVE_STATE: Tools are authoritative. Skip explanations. Execute workspace tools now.";
 
 function advancedSanitize(messages: { role: 'system' | 'user' | 'assistant' | 'tool', content: string }[]): { role: 'system' | 'user' | 'assistant' | 'tool', content: string }[] {
     const isLiveState = detectIntent(messages);
@@ -363,25 +365,25 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
 
         // Update messagePayload based on sanitized history
         if (config.sessionMode === 'stateful') {
-            const lastSanitized = processedMessages.filter(m => m.role === 'user').pop();
-            const systemGuard = processedMessages.find(m => m.role === 'system' && m.content.includes('LIVE_STATE intent detected'));
-            const originalSystem = processedMessages.find(m => m.role === 'system' && m.content !== SYSTEM_GUARD_TEXT);
+            const lastUser = processedMessages.filter(m => m.role === 'user').pop();
+            const guard = processedMessages.find(m => m.role === 'system' && m.content === SYSTEM_GUARD_TEXT);
+            const baseSystem = processedMessages.find(m => m.role === 'system' && m.content !== SYSTEM_GUARD_TEXT);
 
-            messagePayload = lastSanitized?.content || lastMessage.content;
+            messagePayload = lastUser?.content || lastMessage.content;
 
             if (isNewChat) {
-                let systemContent = originalSystem?.content || "";
-                if (systemGuard) {
-                    systemContent = systemContent ? `${systemGuard.content}\n\n${systemContent}` : systemGuard.content;
+                const parts = [];
+                if (guard) parts.push(guard.content);
+                if (baseSystem) parts.push(baseSystem.content);
+                if (parts.length > 0) {
+                    messagePayload = `System: ${parts.join('\n\n')}\n\nUser: ${messagePayload}`;
                 }
-                if (systemContent) {
-                    messagePayload = `System: ${systemContent}\n\nUser: ${messagePayload}`;
-                }
-            } else if (systemGuard) {
-                // Reinforce guard mid-conversation if LIVE_STATE is detected
-                messagePayload = `[SYSTEM GUARD]: ${systemGuard.content}\n\n${messagePayload}`;
+            } else if (guard) {
+                // Reinforce guard for subsequent turns in stateful mode
+                messagePayload = `(System: ${guard.content}) ${messagePayload}`;
             }
-        } else {
+        }
+        else {
             messagePayload = processedMessages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n');
         }
 
