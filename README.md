@@ -10,6 +10,8 @@ ClawProxy is a lightweight OpenAI-compatible API proxy for [OpenClaw](https://gi
 ## Features
 
 - **Agents as Models**: Dynamically exposes your active OpenClaw Agents as selectable "Custom Models" compatible with any standard OpenAI client (OpenWebUI, SillyTavern, etc.).
+- **Reasoning Interception**: Automatically transforms dual-stream (thinking + content) responses into standard `<think>` blocks compatible with Open WebUI.
+- **RAG Hijacking Protection (v5)**: Features an advanced Intent Interceptor that prevents OpenWebUI RAG injections from hijacking workspace queries. It detects `LIVE_STATE` intent and selectively scrubs background context to ensure tool authority.
 - **Streaming Support**: Full Server-Sent Events (SSE) support with anti-buffering headers for instant token delivery.
 - **CORS Support**: Built-in Cross-Origin Resource Sharing allowing web clients (browsers) to connect directly.
 - **Secure**: Optional API Key authentication and local binding.
@@ -82,6 +84,16 @@ services:
 ## Security & Confirmations
 
 See [SECURITY.md](./SECURITY.md) for details on how ClawProxy handles OpenClaw's permission requests and architecture.
+
+## Reasoning Support (Open WebUI)
+
+ClawProxy includes a built-in **Reasoning Stream Interceptor**. This is specifically designed for models that provide a separation between "thinking" (reasoning) and the final "content" (e.g., DeepSeek R1, Kimi K2.5).
+
+- **Tag Transformation**: Intercepts reasoning fields and wraps them in `<think>` tags so Open WebUI can display the "thought process" in its native UI.
+- **Field Stripping**: Removes internal reasoning fields (like `reasoning_content`) from the JSON stream to ensure your client's UI doesn't get cluttered with duplicate data.
+- **Stateful Processing**: Uses an intelligent state machine to detect when the model switches from thinking to answering, ensuring tags are closed correctly even on interrupted streams.
+
+No configuration is required — this feature is enabled by default for all streaming and non-streaming requests.
 
 ### Rejection & Feedback
 If you reply with anything **other** than "APPROVE" (e.g., "No", "Stop", or "Use a different file"):

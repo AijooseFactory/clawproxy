@@ -1,21 +1,22 @@
-import { createServer } from './server';
-import { ClawProxyConfig } from './config';
-import { describe, it, expect, jest, beforeAll } from '@jest/globals';
-import { FastifyInstance } from 'fastify';
-
-// Mock GatewayClient
+// Mock GatewayClient must be before any imports that use it
 jest.mock('./lib/client', () => {
     return {
         GatewayClient: jest.fn().mockImplementation(() => {
             return {
                 on: jest.fn(),
                 start: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+                stop: jest.fn(),
                 request: jest.fn<() => Promise<any>>().mockResolvedValue({ agents: [] }),
                 isConnected: true
             };
         })
     };
 });
+
+import { createServer } from './server';
+import { ClawProxyConfig } from './config';
+import { describe, it, expect, jest } from '@jest/globals';
+import { FastifyInstance } from 'fastify';
 
 describe('Server', () => {
     const config: ClawProxyConfig = {
