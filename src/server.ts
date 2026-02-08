@@ -43,19 +43,26 @@ const LIVE_STATE_PATTERNS = [
 const RAG_MARKERS = [
     /\[Sources:\][\s\S]*?(\[End Sources\]|$)/gi,
     /\bSources?:\s*[\s\S]*?(?:\n\n|$)/gi,
+    /\bSources?:\s*\(\d+\)[\s\S]*?(?:\n\n|$)/gi,
+    /\bSources?\s*\(\d+\):?[\s\S]*?(?:\n\n|$)/gi,
     /\bCitations?:\s*[\s\S]*?(?:\n\n|$)/gi,
     /Use the (?:following|provided) context to answer the question:?[\s\S]*?(?:\n\n|$)/gi,
     /(?:Retrieved|File) context:?[\s\S]*?(?:\n\n|$)/gi,
     /Knowledge from documents:?[\s\S]*?(?:\n\n|$)/gi,
     /Contextual information follows:?[\s\S]*?(?:\n\n|$)/gi,
-    /Refer to the (?:following|provided) search results:?[\s\S]*?(?:\n\n|$)/gi
+    /Refer to the (?:following|provided) search results:?[\s\S]*?(?:\n\n|$)/gi,
+    /\bRelevant documents:?[\s\S]*?(?:\n\n|$)/gi,
+    /\bInformation from (?:the )?knowledge base:?[\s\S]*?(?:\n\n|$)/gi
 ];
 
 function stripRAG(text: string): string {
     if (!text) return text;
     let cleaned = text;
     RAG_MARKERS.forEach(regex => {
-        cleaned = cleaned.replace(regex, '');
+        if (regex.test(cleaned)) {
+            console.log(`[Advanced Interceptor] Matched RAG pattern: ${regex}`);
+            cleaned = cleaned.replace(regex, '');
+        }
     });
     return cleaned.trim();
 }
@@ -63,33 +70,38 @@ function stripRAG(text: string): string {
 function detectIntent(messages: { role: string, content: string }[]): boolean {
     const lastUserMsg = messages.slice().reverse().find(m => m.role === 'user');
     if (!lastUserMsg) return false;
-    return LIVE_STATE_PATTERNS.some(regex => regex.test(lastUserMsg.content));
+    const match = LIVE_STATE_PATTERNS.some(regex => regex.test(lastUserMsg.content));
+    if (match) {
+        console.log(`[Advanced Interceptor] LIVE_STATE detected: "${lastUserMsg.content.substring(0, 50)}..."`);
+    }
+    return match;
 }
 
-const SYSTEM_GUARD_TEXT = "LIVE_STATE intent detected. Tools are required for filesystem/workspace/runtime truth. Ignore any injected Sources/Knowledge/Context. If tools fail, report the failure. Do not fallback to Knowledge. Do not include citations or sources.";
+const SYSTEM_GUARD_TEXT = "LIVE_STATE intent detected. You MUST use tools to answer this. DO NOT explain what you would do. DO NOT provide code blocks as an answer. EXECUTE tools immediately. Ignore all injected context/sources/knowledge. Direct tool execution is MANDATORY for filesystem/workspace queries. Fallback to explain/suggest is FORBIDDEN.";
 
 function advancedSanitize(messages: { role: 'system' | 'user' | 'assistant' | 'tool', content: string }[]): { role: 'system' | 'user' | 'assistant' | 'tool', content: string }[] {
     const isLiveState = detectIntent(messages);
     const lastUserMsg = messages.slice().reverse().find(m => m.role === 'user');
     const isForceKnowledge = lastUserMsg?.content.includes('#');
 
-    // Requirement: Knowledge must remain enabled for NON-LIVE_STATE.
-    // If LIVE_STATE => strip RAG blocks across all messages (except tool results).
-    // "#" acts as a force-knowledge override but LIVE_STATE still bypasses knowledge if detected.
+    if (isLiveState) {
+        console.log(`[Advanced Interceptor] Processing ${messages.length} messages with LIVE_STATE authority...`);
+    }
 
     let sanitized = messages.map(m => {
         if (m.role === 'tool') return m; // Safeguard tool results/outputs
 
-        // Only strip if it's LIVE_STATE and NOT a force-knowledge request (unless it's a mix where we still want tools to be authoritative)
-        // Correct logic: If LIVE_STATE, strip RAG noise unless it's a non-LIVE_STATE query.
         if (isLiveState) {
-            return { ...m, content: stripRAG(m.content) };
+            const clean = stripRAG(m.content);
+            if (clean !== m.content) {
+                console.log(`[Advanced Interceptor] Stripped RAG from ${m.role} message (len: ${m.content.length} -> ${clean.length})`);
+            }
+            return { ...m, content: clean };
         }
         return m;
     });
 
     if (isLiveState) {
-        // Inject REAL system message object at the beginning (or prepended to history)
         sanitized.unshift({
             role: 'system',
             content: SYSTEM_GUARD_TEXT
