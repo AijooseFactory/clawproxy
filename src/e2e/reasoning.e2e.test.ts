@@ -150,4 +150,49 @@ describe('Reasoning Interceptor E2E', () => {
         expect(occurrences).toBe(1);
         expect(fullText).toContain('<think>Native thinking</think> Response content');
     });
+
+    it('should generate incremental deltas from cumulative upstream payloads', async () => {
+        const response = await fetch(`http://127.0.0.1:${PORT}/v1/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: 'cumulative-agent',
+                messages: [{ role: 'user', content: 'Test cumulative.' }],
+                stream: true
+            })
+        });
+
+        if (!response.body) throw new Error('No response body');
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        let fullText = '';
+        let deltaChunks: string[] = [];
+        let done = false;
+
+        while (!done) {
+            const { value, done: doneReading } = await reader.read();
+            done = doneReading;
+            const chunk = decoder.decode(value);
+            const lines = chunk.split('\n');
+            for (const line of lines) {
+                if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                    try {
+                        const data = JSON.parse(line.slice(6));
+                        const content = data.choices[0].delta.content;
+                        if (content) {
+                            deltaChunks.push(content);
+                            fullText += content;
+                        }
+                    } catch (e) { }
+                }
+            }
+        }
+
+        // Upstream sent 'G', 'GE', 'GEM'
+        // Downstream should be 'G', 'E', 'M'
+        console.log('Cumulative Test Deltas:', deltaChunks);
+        expect(deltaChunks).toEqual(['G', 'E', 'M']);
+        expect(fullText).toBe('GEM');
+    });
 });

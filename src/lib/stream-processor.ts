@@ -1,20 +1,27 @@
-
 export class ReasoningStreamProcessor {
     private isThinking = false;
     private hasBailed = false;
+    private accumulatedReasoning = "";
+    private accumulatedContent = "";
 
     /**
      * Processes a single delta chunk from the AI.
      * Transforms reasoning_content/thinking/thought into <think> tags in the content field.
+     * Maps cumulative upstream payloads to incremental downstream deltas.
      */
     processDelta(delta: any): Record<string, any> {
         if (this.hasBailed) return delta;
 
-        const content = delta.content || "";
-        const reasoning = delta.reasoning_content || delta.thinking || delta.thought;
+        // If this is a tool message or has a different role, pass it through but don't update assistant lengths
+        if (delta.role && delta.role !== 'assistant') {
+            return delta;
+        }
+
+        const rawContent = delta.content || "";
+        const rawReasoning = delta.reasoning_content || delta.thinking || delta.thought || "";
 
         // If we see native <think> tag, bail out and act as a pass-through
-        if (content.includes('<think>')) {
+        if (typeof rawContent === 'string' && rawContent.includes('<think>')) {
             this.hasBailed = true;
             return delta;
         }
@@ -25,30 +32,56 @@ export class ReasoningStreamProcessor {
         delete out.thinking;
         delete out.thought;
 
-        let processedContent = "";
+        let incrementalContent = "";
 
-        if (reasoning) {
-            if (!this.isThinking) {
-                this.isThinking = true;
-                processedContent += "<think>";
+        // 1. Process Reasoning
+        if (rawReasoning && typeof rawReasoning === 'string') {
+            // Check if this is a cumulative update or a new delta
+            const newReasoning = this.getIncremental(rawReasoning, this.accumulatedReasoning);
+            if (newReasoning) {
+                if (!this.isThinking) {
+                    this.isThinking = true;
+                    incrementalContent += "<think>";
+                }
+                incrementalContent += newReasoning;
+                this.accumulatedReasoning += newReasoning;
             }
-            processedContent += reasoning;
         }
 
-        if (content) {
-            if (this.isThinking) {
-                this.isThinking = false;
-                processedContent += "</think>\n\n";
+        // 2. Process Content
+        if (rawContent && typeof rawContent === 'string') {
+            const newContent = this.getIncremental(rawContent, this.accumulatedContent);
+            if (newContent) {
+                if (this.isThinking) {
+                    this.isThinking = false;
+                    incrementalContent += "</think>\n\n";
+                }
+                incrementalContent += newContent;
+                this.accumulatedContent += newContent;
             }
-            processedContent += content;
         }
 
-        // Only update content if we actually produced something or if it's explicitly provided as empty
-        if (reasoning || content) {
-            out.content = processedContent;
+        // Only update output if we actually produced incremental text
+        if (incrementalContent) {
+            out.content = incrementalContent;
+        } else {
+            // Drop content field if no new data was found
+            delete out.content;
         }
 
         return out;
+    }
+
+    private getIncremental(updated: string, existing: string): string {
+        if (!updated) return "";
+        // If it's a cumulative update (starts with existing)
+        if (existing && updated.startsWith(existing)) {
+            return updated.slice(existing.length);
+        }
+        // If it's a delta (doesn't start with existing, or existing is empty)
+        // Note: This matches the "GE" -> "GEM" case where it's cumulative.
+        // If it were "A" then "B" as deltas, it would just return "B".
+        return updated;
     }
 
     /**

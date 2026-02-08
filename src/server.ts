@@ -424,10 +424,24 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
                 if (Object.keys(normalized).length === 0) return;
 
                 const processed = processor.processDelta(normalized);
-                if (!processed.content && !processed.role) return;
 
-                sendAssistantRoleChunk();
-                writeSseChunk(processed);
+                // Skip if no new content or role (ReasoningStreamProcessor might have stripped cumulative text)
+                if (Object.keys(processed).length === 0) return;
+                if (!processed.content && !processed.role && !processed.tool_calls) return;
+
+                // Handle role transition correctly
+                if (processed.role === 'assistant') {
+                    sendAssistantRoleChunk();
+                    // Don't send redundant assistant role field if we already sent the role chunk
+                    delete processed.role;
+                } else if (!processed.role || processed.role === 'assistant') {
+                    // Implicit assistant content
+                    sendAssistantRoleChunk();
+                }
+
+                if (Object.keys(processed).length > 0) {
+                    writeSseChunk(processed);
+                }
             };
 
             // Check if we are approving a pending action

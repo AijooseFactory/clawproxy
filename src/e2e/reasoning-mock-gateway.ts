@@ -167,6 +167,36 @@ export class ReasoningMockGateway {
                                 });
                             }, 50);
                         }, 50);
+                    } else if (targetAgent === 'cumulative-agent') {
+                        // Simulate cumulative stream (the bug source)
+                        setTimeout(() => {
+                            sendEvent('agent', {
+                                runId,
+                                stream: 'assistant',
+                                data: { delta: { content: 'G' } }
+                            });
+                            setTimeout(() => {
+                                sendEvent('agent', {
+                                    runId,
+                                    stream: 'assistant',
+                                    data: { delta: { content: 'GE' } }
+                                });
+                                setTimeout(() => {
+                                    sendEvent('agent', {
+                                        runId,
+                                        stream: 'assistant',
+                                        data: { delta: { content: 'GEM' } }
+                                    });
+                                    setTimeout(() => {
+                                        sendEvent('agent', {
+                                            runId,
+                                            stream: 'lifecycle',
+                                            data: { phase: 'end' }
+                                        });
+                                    }, 50);
+                                }, 50);
+                            }, 50);
+                        }, 50);
                     } else {
                         // Simulate reasoning stream
                         setTimeout(() => {
