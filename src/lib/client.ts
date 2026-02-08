@@ -43,12 +43,12 @@ export class GatewayClient extends EventEmitter {
     private pending = new Map<string, { resolve: (val: any) => void; reject: (err: any) => void }>();
     private connectNonce: string | null = null;
     private requestTimeoutMs: number;
+    private reconnectTimer: NodeJS.Timeout | null = null;
+    private isStopped: boolean = false;
 
-    private instanceId = Math.random().toString(36).substring(7);
 
     constructor(opts?: GatewayClientOptions) {
         super();
-        console.log(`DEBUG: GatewayClient initialized [${this.instanceId}]`);
         this.url = opts?.url ?? "ws://127.0.0.1:19001";
         this.token = opts?.token;
         this.requestTimeoutMs = opts?.requestTimeoutMs ?? 30000;
@@ -60,7 +60,21 @@ export class GatewayClient extends EventEmitter {
     }
 
     public async start() {
+        this.isStopped = false;
         await this.connectWithRetry();
+    }
+
+    public stop() {
+        this.isStopped = true;
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+        if (this.ws) {
+            this.ws.removeAllListeners();
+            this.ws.close();
+            this.ws = null;
+        }
     }
 
     private async connectWithRetry(retries = 0): Promise<void> {
@@ -68,9 +82,13 @@ export class GatewayClient extends EventEmitter {
             await this.connect();
             console.log('GatewayClient: Connected successfully');
         } catch (err) {
+            if (this.isStopped) return;
             const delay = Math.min(1000 * Math.pow(2, retries), 30000);
             console.error(`GatewayClient: Connection failed(Attempt ${retries + 1}), retrying in ${delay}ms...`, err);
-            await new Promise(res => setTimeout(res, delay));
+            await new Promise(res => {
+                this.reconnectTimer = setTimeout(res, delay);
+            });
+            this.reconnectTimer = null;
             return this.connectWithRetry(retries + 1);
         }
     }
@@ -120,15 +138,15 @@ export class GatewayClient extends EventEmitter {
                     if (this.isConnected) {
                         // Should not happen if closed
                     } else {
+                        if (this.isStopped) return;
                         // If we were still connecting, this rejects the promise
                         failConnect(new Error("WebSocket closed during connection"));
-                        setTimeout(() => this.connectWithRetry(), 1000);
+                        this.reconnectTimer = setTimeout(() => this.connectWithRetry(), 1000);
                     }
                 });
 
                 this.ws.on('message', (data: WebSocket.Data) => {
                     const msg = data.toString();
-                    console.log('DEBUG: Client WS received', msg.substring(0, 200));
                     try {
                         const parsed = JSON.parse(msg);
                         this.emit('message', parsed);
@@ -146,7 +164,6 @@ export class GatewayClient extends EventEmitter {
                             }
                         } else if (parsed.type === "event") {
                             const evt = parsed as EventFrame;
-                            console.log('DEBUG: Client processing event', evt.event);
                             if (evt.event === "connect.challenge") {
                                 // Gateway sent challenge - now we can connect
                                 console.log('GatewayClient: Received challenge, sending connect...');
@@ -166,10 +183,7 @@ export class GatewayClient extends EventEmitter {
                             }
 
                             // Always emit the event so listeners can handle it (including agent events)
-                            const listenerCount = this.listenerCount('event');
-                            console.log(`DEBUG: [${this.instanceId}] Client emitting event '${evt.event}'. Listener count: ${listenerCount}`);
-                            const emitted = this.emit('event', evt);
-                            console.log(`DEBUG: [${this.instanceId}] Emit result: ${emitted}`);
+                            this.emit('event', evt);
                         }
                     } catch (err) {
                         console.error("Message parse error", err);
