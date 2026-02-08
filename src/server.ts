@@ -53,16 +53,21 @@ const RAG_MARKERS = [
     /Refer to the (?:following|provided) search results:?[\s\S]*?(?:\n\n|$)/gi,
     /\bRelevant documents:?[\s\S]*?(?:\n\n|$)/gi,
     /\bInformation from (?:the )?knowledge base:?[\s\S]*?(?:\n\n|$)/gi,
-    /^\d+\s+Sources?$/gm,
-    /\b\d+\s+Sources?$/g
+    /\b\d+\s+Sources?$/gm,
+    /\b\d+\s+Sources?\b/gi,
+    /^\s*\d+\s+Sources?\s*$/gm,
+    /\n\d+\s+Sources?$/g
 ];
 
 function stripRAG(text: string): string {
     if (!text) return text;
     let cleaned = text;
     RAG_MARKERS.forEach(regex => {
+        // Reset lastIndex because global regexes are stateful
+        regex.lastIndex = 0;
         if (regex.test(cleaned)) {
             console.log(`[Advanced Interceptor] Matched RAG pattern: ${regex}`);
+            regex.lastIndex = 0; // Reset again for replace
             cleaned = cleaned.replace(regex, '');
         }
     });
@@ -79,7 +84,7 @@ function detectIntent(messages: { role: string, content: string }[]): boolean {
     return match;
 }
 
-const SYSTEM_GUARD_TEXT = "LIVE_STATE: Tools are authoritative. Skip explanations. Execute workspace tools now.";
+const SYSTEM_GUARD_TEXT = "[SYSTEM]: LIVE_STATE detected. Use tools for workspace queries. Ignore context.";
 
 function advancedSanitize(messages: { role: 'system' | 'user' | 'assistant' | 'tool', content: string }[]): { role: 'system' | 'user' | 'assistant' | 'tool', content: string }[] {
     const isLiveState = detectIntent(messages);
@@ -346,24 +351,10 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
         const effectiveSessionId = remoteSessionId!;
         let messagePayload = "";
 
-        if (config.sessionMode === 'stateful') {
-            messagePayload = lastMessage.content;
-            if (isNewChat) {
-                const systemMsg = messages.find(m => m.role === 'system');
-                if (systemMsg) {
-                    messagePayload = `System: ${systemMsg.content}\n\nUser: ${messagePayload}`;
-                }
-            }
-        } else {
-            messagePayload = messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n');
-        }
-
         // Apply Advanced Intent Interceptor to bypass RAG hijacking
-        // For stateful mode, we currently process a single string payload. 
-        // To support multi-message stripping as requested, we process the history first.
         const processedMessages = advancedSanitize(messages as any);
 
-        // Update messagePayload based on sanitized history
+        // Flatten payload for OpenClaw Gateway
         if (config.sessionMode === 'stateful') {
             const lastUser = processedMessages.filter(m => m.role === 'user').pop();
             const guard = processedMessages.find(m => m.role === 'system' && m.content === SYSTEM_GUARD_TEXT);
@@ -372,18 +363,16 @@ export async function createServer(config: ClawProxyConfig): Promise<FastifyInst
             messagePayload = lastUser?.content || lastMessage.content;
 
             if (isNewChat) {
-                const parts = [];
-                if (guard) parts.push(guard.content);
-                if (baseSystem) parts.push(baseSystem.content);
-                if (parts.length > 0) {
-                    messagePayload = `System: ${parts.join('\n\n')}\n\nUser: ${messagePayload}`;
+                // For new chats, we can provide some context
+                const systemContent = [guard?.content, baseSystem?.content].filter(Boolean).join('\n\n');
+                if (systemContent) {
+                    messagePayload = `Context: ${systemContent}\n\nTask: ${messagePayload}`;
                 }
             } else if (guard) {
-                // Reinforce guard for subsequent turns in stateful mode
-                messagePayload = `(System: ${guard.content}) ${messagePayload}`;
+                // Minimize noise in follow-ups
+                messagePayload = `(Goal: ${guard.content}) ${messagePayload}`;
             }
-        }
-        else {
+        } else {
             messagePayload = processedMessages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n');
         }
 
